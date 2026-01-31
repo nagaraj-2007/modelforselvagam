@@ -109,7 +109,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
           });
           
           // Show notification when reached becomes true
-          if (data['reached'] == true && _isListening) {
+          if (data['reached'] == true) {
             _showNotification(
               'Bus Arrived!',
               'The bus has reached ${data['name']}',

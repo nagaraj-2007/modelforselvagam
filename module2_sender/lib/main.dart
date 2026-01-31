@@ -230,7 +230,10 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
       _nameController.clear();
       
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Target created and selected')),
+        SnackBar(
+          content: Text('Target created! Share ID: ${docRef.id}'),
+          duration: const Duration(seconds: 5),
+        ),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -328,12 +331,22 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Selected Target: ${_selectedTarget!['name']}',
+                              'Target: ${_selectedTarget!['name']}',
                               style: const TextStyle(fontWeight: FontWeight.bold),
                             ),
+                            Text('ID: $_selectedTargetId'),
                             Text('Status: ${_selectedTarget!['reached'] ? 'Reached' : 'Not Reached'}'),
                             if (_currentDistance != null)
                               Text('Distance: ${_currentDistance!.toStringAsFixed(0)}m'),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Share this Target ID with passengers:',
+                              style: TextStyle(fontSize: 12, color: Colors.grey),
+                            ),
+                            SelectableText(
+                              _selectedTargetId!,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                            ),
                           ],
                         ),
                       ),

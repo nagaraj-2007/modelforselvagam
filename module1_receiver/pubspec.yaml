@@ -1,5 +1,5 @@
 name: module1_receiver
-description: FCM notification receiver with text-to-speech
+description: Passenger app that receives bus arrival notifications via Firestore
 version: 1.0.0+1
 
 environment:
