@@ -136,8 +136,6 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
   Map<String, dynamic>? _selectedTarget;
   double? _currentDistance;
   
-  final TextEditingController _nameController = TextEditingController();
-  
   @override
   void initState() {
     super.initState();
@@ -195,20 +193,22 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
     }
   }
 
-  Future<void> _createTarget() async {
-    if (_currentPosition == null || _nameController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter target name and ensure location is available')),
-      );
-      return;
+  Future<void> _createTargetAtLocation(LatLng position, [String? customName]) async {
+    String targetName;
+    
+    if (customName != null) {
+      targetName = customName;
+    } else {
+      // Show dialog to enter target name
+      targetName = await _showNameDialog() ?? 'Target ${DateTime.now().millisecondsSinceEpoch}';
     }
 
     try {
       DocumentReference docRef = await FirebaseFirestore.instance
           .collection('targets')
           .add({
-        'name': _nameController.text.trim(),
-        'location': GeoPoint(_currentPosition!.latitude, _currentPosition!.longitude),
+        'name': targetName,
+        'location': GeoPoint(position.latitude, position.longitude),
         'radius': 100,
         'reached': false,
         'reachedAt': null,
@@ -220,18 +220,16 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
       setState(() {
         _selectedTargetId = docRef.id;
         _selectedTarget = {
-          'name': _nameController.text.trim(),
-          'location': GeoPoint(_currentPosition!.latitude, _currentPosition!.longitude),
+          'name': targetName,
+          'location': GeoPoint(position.latitude, position.longitude),
           'radius': 100,
           'reached': false,
         };
       });
       
-      _nameController.clear();
-      
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Target created! Share ID: ${docRef.id}'),
+          content: Text('Target "$targetName" created! Share ID: ${docRef.id}'),
           duration: const Duration(seconds: 5),
         ),
       );
@@ -240,6 +238,37 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
         SnackBar(content: Text('Error creating target: $e')),
       );
     }
+  }
+
+  Future<String?> _showNameDialog() async {
+    final TextEditingController nameController = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Enter Target Name'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(
+            labelText: 'Target Name',
+            hintText: 'e.g., School Gate, Bus Stop A',
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              final name = nameController.text.trim();
+              Navigator.pop(context, name.isEmpty ? null : name);
+            },
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _toggleTracking() async {
@@ -283,6 +312,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                 zoom: 15,
               ),
               onMapCreated: (controller) => _mapController = controller,
+              onTap: _createTargetAtLocation,
               myLocationEnabled: true,
               markers: _selectedTarget != null
                   ? {
@@ -305,19 +335,27 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
-                  // Create Target
-                  TextField(
-                    controller: _nameController,
-                    decoration: const InputDecoration(
-                      labelText: 'Target Name',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  ElevatedButton(
-                    onPressed: _createTarget,
-                    child: const Text('Create Target at Current Location'),
+                  // Quick Actions
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            if (_currentPosition != null) {
+                              _createTargetAtLocation(
+                                LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+                              );
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Getting location...')),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.my_location),
+                          label: const Text('Create Here'),
+                        ),
+                      ),
+                    ],
                   ),
                   
                   const SizedBox(height: 16),
@@ -340,7 +378,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                               Text('Distance: ${_currentDistance!.toStringAsFixed(0)}m'),
                             const SizedBox(height: 8),
                             const Text(
-                              'Share this Target ID with passengers:',
+                              'Tap anywhere on the map to create a target',
                               style: TextStyle(fontSize: 12, color: Colors.grey),
                             ),
                             SelectableText(
@@ -362,6 +400,32 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _isTracking ? Colors.red : Colors.green,
                       foregroundColor: Colors.white,
+                    ),
+                  ),
+                  
+                  const SizedBox(height: 16),
+                  
+                  // Instructions
+                  const Card(
+                    color: Colors.blue,
+                    child: Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Column(
+                        children: [
+                          Icon(Icons.info, color: Colors.white),
+                          SizedBox(height: 8),
+                          Text(
+                            'How to create targets:',
+                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            '• Tap anywhere on the map\n• Or use "Create Here" for current location',
+                            style: TextStyle(color: Colors.white, fontSize: 12),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
