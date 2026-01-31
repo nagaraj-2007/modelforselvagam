@@ -1,20 +1,107 @@
-
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:googleapis_auth/auth_io.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'background_service.dart';
+import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await BackgroundService.initialize();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await initializeService();
   runApp(const MyApp());
+}
+
+Future<void> initializeService() async {
+  final service = FlutterBackgroundService();
+  await service.configure(
+    iosConfiguration: IosConfiguration(
+      autoStart: false,
+      onForeground: onStart,
+      onBackground: onIosBackground,
+    ),
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: false,
+      isForegroundMode: true,
+      autoStartOnBoot: false,
+    ),
+  );
+}
+
+@pragma('vm:entry-point')
+bool onIosBackground(ServiceInstance service) {
+  return true;
+}
+
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  
+  final prefs = await SharedPreferences.getInstance();
+  String? targetId = prefs.getString('selectedTargetId');
+  
+  if (targetId == null) {
+    service.stopSelf();
+    return;
+  }
+
+  Timer.periodic(const Duration(seconds: 10), (timer) async {
+    try {
+      Position position = await Geolocator.getCurrentPosition();
+      
+      DocumentSnapshot doc = await FirebaseFirestore.instance
+          .collection('targets')
+          .doc(targetId)
+          .get();
+      
+      if (!doc.exists) {
+        timer.cancel();
+        service.stopSelf();
+        return;
+      }
+      
+      Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+      if (data['reached'] == true) {
+        timer.cancel();
+        service.stopSelf();
+        return;
+      }
+      
+      GeoPoint targetLocation = data['location'];
+      double distance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        targetLocation.latitude,
+        targetLocation.longitude,
+      );
+      
+      service.invoke('update', {
+        'distance': distance.round(),
+        'lat': position.latitude,
+        'lng': position.longitude,
+      });
+      
+      if (distance <= (data['radius'] ?? 100)) {
+        await FirebaseFirestore.instance
+            .collection('targets')
+            .doc(targetId)
+            .update({
+          'reached': true,
+          'reachedAt': FieldValue.serverTimestamp(),
+        });
+        
+        timer.cancel();
+        service.stopSelf();
+      }
+    } catch (e) {
+      print('Background service error: $e');
+    }
+  });
 }
 
 class MyApp extends StatelessWidget {
@@ -27,723 +114,242 @@ class MyApp extends StatelessWidget {
       title: 'Bus Tracker',
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1A237E),
-          primary: const Color(0xFF1A237E),
-          secondary: const Color(0xFF00C853),
-        ),
-        cardTheme: CardThemeData(
-          elevation: 4,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
       ),
-      home: const MainScreen(),
+      home: const BusTrackerScreen(),
     );
   }
 }
 
-class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+class BusTrackerScreen extends StatefulWidget {
+  const BusTrackerScreen({super.key});
 
   @override
-  State<MainScreen> createState() => _MainScreenState();
+  State<BusTrackerScreen> createState() => _BusTrackerScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _BusTrackerScreenState extends State<BusTrackerScreen> {
   GoogleMapController? _mapController;
   Position? _currentPosition;
-  bool _isBackgroundTracking = false;
-  Timer? _statusTimer;
+  bool _isTracking = false;
+  String? _selectedTargetId;
+  Map<String, dynamic>? _selectedTarget;
+  double? _currentDistance;
   
-  final TextEditingController _tokenController = TextEditingController();
+  final TextEditingController _nameController = TextEditingController();
   
-  List<Map<String, dynamic>> _targetLocations = [];
-  int? _selectedTargetIndex;
-
   @override
   void initState() {
     super.initState();
-    _stopAnyExistingService(); // Stop any service from previous session
-    _requestInitialPermissions(); // Request permissions at startup
-    _loadStoredData();
-    _startStatusPoller();
     _getCurrentLocation();
+    _loadSelectedTarget();
+    _setupServiceListener();
   }
 
-  Future<void> _requestInitialPermissions() async {
-    try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      
-      if (permission == LocationPermission.deniedForever) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Location permission is required. Please enable it in app settings.'),
-              duration: Duration(seconds: 5),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      print('Permission request error: $e');
-    }
-  }
-
-  Future<void> _stopAnyExistingService() async {
+  void _setupServiceListener() {
     final service = FlutterBackgroundService();
-    if (await service.isRunning()) {
-      service.invoke("stopService");
-    }
-  }
-
-  @override
-  void dispose() {
-    _tokenController.dispose();
-    _statusTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startStatusPoller() {
-    _statusTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
-      final prefs = await SharedPreferences.getInstance();
-      
-      // Check if any target was reached and update UI
-      final targetLocsJson = prefs.getString('targetLocations');
-      if (targetLocsJson != null) {
-        final List<dynamic> targets = jsonDecode(targetLocsJson);
-        setState(() {
-          _targetLocations = targets.map((e) => Map<String, dynamic>.from(e)).toList();
-        });
-      }
-      
-      final service = FlutterBackgroundService();
-      final isRunning = await service.isRunning();
+    service.on('update').listen((event) {
       if (mounted) {
         setState(() {
-          _isBackgroundTracking = isRunning;
+          _currentDistance = event?['distance']?.toDouble();
         });
       }
     });
   }
 
   Future<void> _getCurrentLocation() async {
-    try {
-      // Request permissions first
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          return;
-        }
-      }
-      
-      if (permission == LocationPermission.deniedForever) {
-        return;
-      }
-
-      Position pos = await Geolocator.getCurrentPosition();
-      setState(() => _currentPosition = pos);
-      _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(pos.latitude, pos.longitude), 15));
-    } catch (e) {
-      print("Error getting location: $e");
-    }
-  }
-
-  Future<void> _requestPermissions() async {
-    var status = await Permission.location.request();
-    if (status.isPermanentlyDenied) {
-      openAppSettings();
-      return;
-    }
-
-    if (await Permission.location.isGranted) {
-      var bgStatus = await Permission.locationAlways.request();
-      if (bgStatus.isDenied) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text('Background location is required. Please select "Allow all the time" in settings.'),
-              duration: const Duration(seconds: 5),
-              action: SnackBarAction(
-                label: 'Settings',
-                onPressed: () => openAppSettings(),
-              ),
-            ),
-          );
-        }
-      }
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
     }
     
-    await Permission.notification.request();
+    if (permission == LocationPermission.deniedForever) return;
     
-    // Check battery optimization
-    _checkBatteryOptimization();
-  }
-  
-  Future<void> _checkBatteryOptimization() async {
-    final prefs = await SharedPreferences.getInstance();
-    final hasShownDialog = prefs.getBool('batteryOptimizationDialogShown') ?? false;
+    Position position = await Geolocator.getCurrentPosition();
+    setState(() => _currentPosition = position);
     
-    if (!hasShownDialog && mounted) {
-      await prefs.setBool('batteryOptimizationDialogShown', true);
-      
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.battery_alert, color: Colors.orange),
-              SizedBox(width: 8),
-              Text('Important Setup'),
-            ],
-          ),
-          content: const Text(
-            'Your phone may stop background tracking and notifications to save battery.\n\n'
-            'To ensure you receive notifications when the bus arrives, please disable battery optimization for this app.\n\n'
-            'Steps:\n'
-            '1. Tap "Open Settings" below\n'
-            '2. Find "Battery" or "Battery optimization"\n'
-            '3. Select "Don\'t optimize" or "Allow"'
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Later'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                openAppSettings();
-              },
-              child: const Text('Open Settings'),
-            ),
-          ],
-        ),
-      );
-    }
-  }
-
-  Future<void> _loadStoredData() async {
-    final prefs = await SharedPreferences.getInstance();
-    final storedToken = prefs.getString('fcmToken');
-    if (storedToken != null && storedToken.isNotEmpty) {
-       _tokenController.text = storedToken;
-    }
-    
-    final targetLocsJson = prefs.getString('targetLocations');
-    if (targetLocsJson != null) {
-      final List<dynamic> decoded = jsonDecode(targetLocsJson);
-      setState(() {
-        _targetLocations = decoded.map((e) => Map<String, dynamic>.from(e)).toList();
-      });
-    }
-    
-    final storedIndex = prefs.getInt('selectedTargetIndex');
-    if (storedIndex != null && storedIndex < _targetLocations.length) {
-      _selectedTargetIndex = storedIndex;
-    }
-  }
-
-  Future<void> _saveData() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('fcmToken', _tokenController.text.trim());
-    
-    await prefs.setString('targetLocations', jsonEncode(_targetLocations));
-    if (_selectedTargetIndex != null) {
-      await prefs.setInt('selectedTargetIndex', _selectedTargetIndex!);
-    }
-    
-    try {
-      final serviceAccountJson = await rootBundle.loadString('assets/service-account-key.json');
-      await prefs.setString('serviceAccountJson', serviceAccountJson);
-    } catch (e) {
-      print("Error loading service account: $e");
-    }
-  }
-
-  Future<void> _addTargetAtLocation(LatLng position) async {
-    String? name = await _showNameDialog('Target ${_targetLocations.length + 1}');
-    if (name == null) return;
-    
-    setState(() {
-      _targetLocations.add({
-        'name': name,
-        'lat': position.latitude,
-        'lng': position.longitude,
-        'reached': false,
-      });
-    });
-    
-    await _saveData();
-    
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Target "$name" added at ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}'),
-          duration: const Duration(seconds: 3),
-        ),
-      );
-    }
-  }
-
-  Future<String?> _showNameDialog(String defaultName) async {
-    TextEditingController nameController = TextEditingController(text: defaultName);
-    return showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Enter Location Name'),
-        content: TextField(
-          controller: nameController,
-          decoration: const InputDecoration(labelText: 'Name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, nameController.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
+    _mapController?.animateCamera(
+      CameraUpdate.newLatLngZoom(
+        LatLng(position.latitude, position.longitude),
+        15,
       ),
     );
   }
 
-  void _deleteTarget(int index) {
-    setState(() {
-      _targetLocations.removeAt(index);
-      if (_selectedTargetIndex == index) {
-        _selectedTargetIndex = null;
-      } else if (_selectedTargetIndex != null && _selectedTargetIndex! > index) {
-        _selectedTargetIndex = _selectedTargetIndex! - 1;
+  Future<void> _loadSelectedTarget() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? targetId = prefs.getString('selectedTargetId');
+    
+    if (targetId != null) {
+      DocumentSnapshot doc = await FirebaseFirestore.instance
+          .collection('targets')
+          .doc(targetId)
+          .get();
+      
+      if (doc.exists) {
+        setState(() {
+          _selectedTargetId = targetId;
+          _selectedTarget = doc.data() as Map<String, dynamic>;
+        });
       }
-      // Reset if selected index is now out of bounds
-      if (_selectedTargetIndex != null && _selectedTargetIndex! >= _targetLocations.length) {
-        _selectedTargetIndex = null;
-      }
-    });
-    _saveData();
+    }
   }
 
-  Future<void> _editTarget(int index) async {
-    String? newName = await _showNameDialog(_targetLocations[index]['name']);
-    if (newName != null && newName.isNotEmpty) {
-      setState(() {
-        _targetLocations[index]['name'] = newName;
+  Future<void> _createTarget() async {
+    if (_currentPosition == null || _nameController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter target name and ensure location is available')),
+      );
+      return;
+    }
+
+    try {
+      DocumentReference docRef = await FirebaseFirestore.instance
+          .collection('targets')
+          .add({
+        'name': _nameController.text.trim(),
+        'location': GeoPoint(_currentPosition!.latitude, _currentPosition!.longitude),
+        'radius': 100,
+        'reached': false,
+        'reachedAt': null,
       });
-      _saveData();
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('selectedTargetId', docRef.id);
+      
+      setState(() {
+        _selectedTargetId = docRef.id;
+        _selectedTarget = {
+          'name': _nameController.text.trim(),
+          'location': GeoPoint(_currentPosition!.latitude, _currentPosition!.longitude),
+          'radius': 100,
+          'reached': false,
+        };
+      });
+      
+      _nameController.clear();
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Target created and selected')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error creating target: $e')),
+      );
     }
   }
 
   Future<void> _toggleTracking() async {
-    if (_isBackgroundTracking) {
-      final service = FlutterBackgroundService();
-      service.invoke("stopService");
-      setState(() => _isBackgroundTracking = false);
-    } else {
-      if (_tokenController.text.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Please enter Receiver Token first')),
-        );
-        return;
-      }
-
-      if (_selectedTargetIndex == null || _targetLocations.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Please select a target location first')),
-        );
-        return;
-      }
-
-      await _requestPermissions();
-      await _saveData();
-      
-      final service = FlutterBackgroundService();
-      await service.startService();
-      setState(() => _isBackgroundTracking = true);
-      
-      // If already at target location, trigger immediately
-      if (_currentPosition != null && _selectedTargetIndex != null) {
-        final target = _targetLocations[_selectedTargetIndex!];
-        double distance = Geolocator.distanceBetween(
-          _currentPosition!.latitude,
-          _currentPosition!.longitude,
-          target['lat'],
-          target['lng'],
-        );
-        
-        if (distance <= 100) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Already at ${target['name']}! Distance: ${distance.toStringAsFixed(0)}m - Notification will be sent automatically')),
-          );
-        }
-      }
-    }
-  }
-
-  Future<void> _sendCurrentLocation() async {
-    final token = _tokenController.text.trim();
-    if (token.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Token required')));
+    if (_selectedTargetId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please create a target first')),
+      );
       return;
     }
 
-    try {
-      // Request permissions first
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          throw Exception('Location permissions are denied');
-        }
-      }
-      
-      if (permission == LocationPermission.deniedForever) {
-        throw Exception('Location permissions are permanently denied');
-      }
-
-      Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      final serviceAccountJson = await rootBundle.loadString('assets/service-account-key.json');
-      
-      await BackgroundService.sendCurrentLocation(serviceAccountJson, token, position);
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Current location sent: ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}')),
-        );
-      }
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  Future<void> _sendTestNotification() async {
-    final token = _tokenController.text.trim();
-    if (token.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Token required')));
-      return;
-    }
-
-    try {
-      final serviceAccountJson = await rootBundle.loadString('assets/service-account-key.json');
-      final serviceAccount = jsonDecode(serviceAccountJson);
-      
-      final credentials = ServiceAccountCredentials.fromJson(serviceAccount);
-      final client = await clientViaServiceAccount(
-        credentials,
-        ['https://www.googleapis.com/auth/firebase.messaging'],
-      );
-
-      final response = await client.post(
-        Uri.parse('https://fcm.googleapis.com/v1/projects/${serviceAccount['project_id']}/messages:send'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'message': {
-            'token': token,
-            'notification': {
-              'title': 'Test: Bus Reached Your Destination!',
-              'body': 'Manual test notification - checking connection',
-            },
-            'android': {'priority': 'high'},
-          },
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Test notification sent successfully!')));
-      } else {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: ${response.statusCode}')));
-      }
-      client.close();
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  void _clearAllTargets() {
-    setState(() {
-      _targetLocations.clear();
-      _selectedTargetIndex = null;
-    });
-    _saveData();
+    final service = FlutterBackgroundService();
     
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('All targets cleared')),
-    );
+    if (_isTracking) {
+      service.invoke('stopService');
+      setState(() => _isTracking = false);
+    } else {
+      await Permission.locationAlways.request();
+      await service.startService();
+      setState(() => _isTracking = true);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    Set<Marker> markers = {};
-    
-    for (int i = 0; i < _targetLocations.length; i++) {
-      final target = _targetLocations[i];
-      markers.add(Marker(
-        markerId: MarkerId('target_$i'),
-        position: LatLng(target['lat'], target['lng']),
-        infoWindow: InfoWindow(title: target['name']),
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          i == _selectedTargetIndex 
-            ? (target['reached'] == true ? BitmapDescriptor.hueOrange : BitmapDescriptor.hueBlue)
-            : BitmapDescriptor.hueRed,
-        ),
-      ));
-    }
-
     return Scaffold(
-      backgroundColor: Colors.grey[100],
       appBar: AppBar(
-        title: const Text('Bus Tracker', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        title: const Text('Bus Tracker'),
         backgroundColor: Theme.of(context).colorScheme.primary,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.clear_all, color: Colors.white),
-            onPressed: _clearAllTargets,
-            tooltip: 'Clear All Targets',
-          ),
-        ],
+        foregroundColor: Colors.white,
       ),
       body: Column(
         children: [
-          // Map Section
+          // Map
           SizedBox(
-            height: MediaQuery.of(context).size.height * 0.4,
+            height: 300,
             child: GoogleMap(
               initialCameraPosition: CameraPosition(
-                target: _currentPosition != null 
-                  ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
-                  : const LatLng(10.081642, 78.746657),
+                target: _currentPosition != null
+                    ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
+                    : const LatLng(0, 0),
                 zoom: 15,
               ),
-              onMapCreated: (c) => _mapController = c,
-              markers: markers,
+              onMapCreated: (controller) => _mapController = controller,
               myLocationEnabled: true,
-              myLocationButtonEnabled: true,
-              onLongPress: _addTargetAtLocation,
+              markers: _selectedTarget != null
+                  ? {
+                      Marker(
+                        markerId: const MarkerId('target'),
+                        position: LatLng(
+                          _selectedTarget!['location'].latitude,
+                          _selectedTarget!['location'].longitude,
+                        ),
+                        infoWindow: InfoWindow(title: _selectedTarget!['name']),
+                      ),
+                    }
+                  : {},
             ),
           ),
           
-          // Controls Section
+          // Controls
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: ListView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
                 children: [
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Receiver Token', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          const SizedBox(height: 8),
-                          TextField(
-                            controller: _tokenController,
-                            decoration: const InputDecoration(
-                              labelText: 'FCM Token',
-                              border: OutlineInputBorder(),
-                              prefixIcon: Icon(Icons.key),
+                  // Create Target
+                  TextField(
+                    controller: _nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Target Name',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  
+                  ElevatedButton(
+                    onPressed: _createTarget,
+                    child: const Text('Create Target at Current Location'),
+                  ),
+                  
+                  const SizedBox(height: 16),
+                  
+                  // Selected Target Info
+                  if (_selectedTarget != null) ..[
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Selected Target: ${_selectedTarget!['name']}',
+                              style: const TextStyle(fontWeight: FontWeight.bold),
                             ),
-                            style: const TextStyle(fontSize: 12),
-                            onChanged: (v) => _saveData(),
-                          ),
-                        ],
+                            Text('Status: ${_selectedTarget!['reached'] ? 'Reached' : 'Not Reached'}'),
+                            if (_currentDistance != null)
+                              Text('Distance: ${_currentDistance!.toStringAsFixed(0)}m'),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  
-                  const SizedBox(height: 16),
-                  
-
-                  // Target Locations List
-                  if (_targetLocations.isNotEmpty) ...[
-                    const Text('Target Locations:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 16),
                   ],
-                  if (_targetLocations.isNotEmpty)
-                    ..._targetLocations.asMap().entries.map((entry) {
-                      int index = entry.key;
-                      Map<String, dynamic> target = entry.value;
-                      bool isSelected = index == _selectedTargetIndex;
-                      
-                      return Card(
-                        color: isSelected 
-                          ? (target['reached'] == true ? Colors.orange[50] : Colors.blue[50])
-                          : Colors.grey[50],
-                        child: ListTile(
-                          leading: Icon(
-                            target['reached'] == true ? Icons.check_circle : Icons.location_on,
-                            color: isSelected 
-                              ? (target['reached'] == true ? Colors.orange : Colors.blue)
-                              : Colors.grey,
-                          ),
-                          title: Text(target['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text('Lat: ${target['lat'].toStringAsFixed(6)}\nLng: ${target['lng'].toStringAsFixed(6)}'),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (_currentPosition != null && target['reached'] != true)
-                                Text(
-                                  '${Geolocator.distanceBetween(_currentPosition!.latitude, _currentPosition!.longitude, target['lat'], target['lng']).toStringAsFixed(0)}m',
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-                                ),
-                              const SizedBox(width: 8),
-                              ElevatedButton(
-                                onPressed: () async {
-                                  setState(() {
-                                    _selectedTargetIndex = index;
-                                  });
-                                  await _saveData();
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text('Selected ${target['name']} as target')),
-                                  );
-                                },
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: isSelected ? Colors.orange : Colors.green,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                ),
-                                child: Text(isSelected ? 'Selected' : 'Select', style: const TextStyle(fontSize: 12)),
-                              ),
-                              PopupMenuButton(
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'select',
-                                    child: Text(isSelected ? 'Deselect' : 'Select'),
-                                  ),
-                                  const PopupMenuItem(
-                                    value: 'edit',
-                                    child: Text('Edit Name'),
-                                  ),
-                                  const PopupMenuItem(
-                                    value: 'delete',
-                                    child: Text('Delete'),
-                                  ),
-                                ],
-                                onSelected: (value) {
-                                  switch (value) {
-                                    case 'select':
-                                      setState(() {
-                                        _selectedTargetIndex = isSelected ? null : index;
-                                      });
-                                      _saveData();
-                                      break;
-                                    case 'edit':
-                                      _editTarget(index);
-                                      break;
-                                    case 'delete':
-                                      _deleteTarget(index);
-                                      break;
-                                  }
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }).toList(),
                   
-                  const SizedBox(height: 16),
-                  
-                  // Start/Stop Tracking
+                  // Tracking Button
                   ElevatedButton.icon(
                     onPressed: _toggleTracking,
-                    icon: Icon(_isBackgroundTracking ? Icons.stop : Icons.play_arrow),
-                    label: Text(_isBackgroundTracking ? 'STOP TRACKING' : 'START TRACKING'),
+                    icon: Icon(_isTracking ? Icons.stop : Icons.play_arrow),
+                    label: Text(_isTracking ? 'Stop Tracking' : 'Start Tracking'),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _isBackgroundTracking ? Colors.red : Colors.blue,
+                      backgroundColor: _isTracking ? Colors.red : Colors.green,
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.all(16),
                     ),
-                  ),
-                  
-                  const SizedBox(height: 8),
-                  
-                  OutlinedButton.icon(
-                    onPressed: _sendCurrentLocation,
-                    icon: const Icon(Icons.my_location),
-                    label: const Text('Send Current Location'),
-                  ),
-                  
-                  const SizedBox(height: 8),
-                  
-                  OutlinedButton.icon(
-                    onPressed: () async {
-                      try {
-                        Position position = await Geolocator.getCurrentPosition();
-                        // Create target 10 meters away (very close for testing)
-                        double testLat = position.latitude + 0.00009; // ~10m north
-                        double testLng = position.longitude;
-                        
-                        setState(() {
-                          _targetLocations.add({
-                            'name': 'Test Target (10m away)',
-                            'lat': testLat,
-                            'lng': testLng,
-                            'reached': false,
-                          });
-                          _selectedTargetIndex = _targetLocations.length - 1;
-                        });
-                        
-                        await _saveData();
-                        
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Test target created 10m away and selected')),
-                        );
-                        
-                        _mapController?.animateCamera(
-                          CameraUpdate.newLatLngZoom(
-                            LatLng(position.latitude, position.longitude),
-                            18,
-                          ),
-                        );
-                      } catch (e) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Error: $e')),
-                        );
-                      }
-                    },
-                    icon: const Icon(Icons.add_location_alt),
-                    label: const Text('Add Test Target (10m away)'),
-                  ),
-                  
-                  const SizedBox(height: 8),
-                  
-                  OutlinedButton.icon(
-                    onPressed: () async {
-                      if (_selectedTargetIndex != null && _selectedTargetIndex! < _targetLocations.length) {
-                        final target = _targetLocations[_selectedTargetIndex!];
-                        try {
-                          final serviceAccountJson = await rootBundle.loadString('assets/service-account-key.json');
-                          await BackgroundService.sendCurrentLocation(serviceAccountJson, _tokenController.text.trim(), _currentPosition!);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Force notification sent for ${target['name']}')),
-                          );
-                        } catch (e) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Error: $e')),
-                          );
-                        }
-                      }
-                    },
-                    icon: const Icon(Icons.notification_important),
-                    label: const Text('Force Send Target Notification'),
-                  ),
-                  
-                  const SizedBox(height: 8),
-                  
-                  Text(
-                    _isBackgroundTracking 
-                      ? (_selectedTargetIndex != null && _selectedTargetIndex! < _targetLocations.length
-                          ? 'Tracking active. Notification will be sent when reaching "${_targetLocations[_selectedTargetIndex!]['name']}".'
-                          : 'Tracking active but no target selected.')
-                      : 'Long press on map to add targets, select one, and start tracking.',
-                    style: TextStyle(color: Colors.grey[600], fontSize: 12),
-                    textAlign: TextAlign.center,
                   ),
                 ],
               ),

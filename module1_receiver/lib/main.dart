@@ -1,237 +1,245 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter_tts/flutter_tts.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'firebase_options.dart';
 
-@pragma('vm:entry-point')
-Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  print('=== BACKGROUND FCM RECEIVED ===');
-  print('Title: ${message.notification?.title}');
-  print('Body: ${message.notification?.body}');
-  print('Data: ${message.data}');
-  
-  // Ensure we can use plugins in background
-  WidgetsFlutterBinding.ensureInitialized();
-  
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-  
-  print("Background Message Received: ${message.notification?.title}");
-  
-  final tts = FlutterTts();
-  await tts.setLanguage("en-US");
-  await tts.setSpeechRate(0.5);
-  await tts.setVolume(1.0);
-  await tts.setPitch(1.0);
-  
-  // Important for Android: wait for completion to avoid isolate termination
-  await tts.awaitSpeakCompletion(true);
-  
-  // Create a combined text to speak
-  String speechText = "";
-  if (message.notification?.title != null) {
-      speechText += "${message.notification!.title}. ";
-  }
-  if (message.notification?.body != null) {
-      speechText += "${message.notification!.body}";
-  }
-  
-  // Fallback to data if notification is empty
-  if (speechText.trim().isEmpty && message.data.isNotEmpty) {
-      if (message.data.containsKey('location_name')) {
-        speechText = "Bus reaching at ${message.data['location_name']}";
-      }
-  }
-
-  if (speechText.isNotEmpty) {
-    print("Speaking in background: $speechText");
-    try {
-      await tts.speak(speechText);
-      // Wait a bit more to ensure it actually starts
-      await Future.delayed(const Duration(seconds: 2));
-    } catch (e) {
-      print("TTS Background Error: $e");
-    }
-  }
-}
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-  
-  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-  
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await _initializeNotifications();
   runApp(const MyApp());
 }
 
-class MyApp extends StatefulWidget {
-  const MyApp({super.key});
-  @override
-  State<MyApp> createState() => _MyAppState();
+Future<void> _initializeNotifications() async {
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  
+  const InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+  
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
 }
 
-class _MyAppState extends State<MyApp> {
-  final FlutterTts tts = FlutterTts();
-  String? _token;
-  String _lastMessage = "No messages yet";
-  bool _isSpeaking = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initTTS();
-    _setupFCM();
-  }
-
-  Future<void> _initTTS() async {
-    await tts.setLanguage("en-US");
-    await tts.setSpeechRate(0.5);
-    await tts.setVolume(1.0);
-    await tts.setPitch(1.0);
-    await tts.awaitSpeakCompletion(true);
-    
-    tts.setStartHandler(() {
-      if (mounted) setState(() => _isSpeaking = true);
-    });
-
-    tts.setCompletionHandler(() {
-      if (mounted) setState(() => _isSpeaking = false);
-    });
-
-    tts.setErrorHandler((msg) {
-       if (mounted) setState(() => _isSpeaking = false);
-       print("TTS Error: $msg");
-    });
-  }
-
-  Future<void> _setupFCM() async {
-    NotificationSettings settings = await FirebaseMessaging.instance.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
-    
-    print('User granted permission: ${settings.authorizationStatus}');
-
-    _token = await FirebaseMessaging.instance.getToken();
-    print('FCM Token: $_token');
-    if (mounted) setState(() {});   
-    
-    // Foreground handler
-    FirebaseMessaging.onMessage.listen((message) {
-      print('=== FOREGROUND FCM RECEIVED ===');
-      print('Title: ${message.notification?.title}');
-      print('Body: ${message.notification?.body}');
-      print('Data: ${message.data}');
-      
-      String title = message.notification?.title ?? "Notification";
-      String body = message.notification?.body ?? "";
-      
-      // Fallback to data
-      if (body.isEmpty && message.data.isNotEmpty) {
-        if (message.data.containsKey('location_name')) {
-          body = "Bus reached ${message.data['location_name']}";
-        }
-      }
-
-      String fullText = "$title. $body";
-      print('Speaking: $fullText');
-      
-      if (mounted) {
-        setState(() {
-          _lastMessage = fullText;
-        });
-      }
-      
-      _speak(fullText);
-    });
-  }
-  
-  Future<void> _speak(String text) async {
-    await tts.speak(text);
-  }
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.deepPurple),
-      home: Scaffold(
-        appBar: AppBar(title: const Text('Module 1: Receiver (Voice)')),
-        body: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  _isSpeaking ? Icons.record_voice_over : Icons.notifications_active,
-                  size: 80,
-                  color: _isSpeaking ? Colors.green : Colors.deepPurple,
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  _isSpeaking ? "Speaking..." : "Ready to Receive",
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 40),
-                const Text('Last Received Message:', style: TextStyle(color: Colors.grey)),
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade200,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
-                  child: Text(
-                    _lastMessage,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ),
-                const SizedBox(height: 30),
-                if (_token != null) ...[
-                  const Text('Your FCM Token:', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  GestureDetector(
-                    onTap: () {
-                      // Copy to clipboard
-                      // Clipboard.setData(ClipboardData(text: _token!)); // requires flutter/services
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.amber.shade100,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: SelectableText(
-                        _token!, 
-                        style: const TextStyle(fontFamily: 'Courier', fontSize: 12),
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.only(top: 8.0),
-                    child: Text("Copy this token to Module 2", style: TextStyle(fontSize: 10)),
-                  ),
-                ] else
-                   const CircularProgressIndicator(),
-                   
-                const SizedBox(height: 40),
-                ElevatedButton(
-                   onPressed: () => _speak("This is a test of the voice notification system."),
-                   child: const Text("Test Voice"),
-                )
-              ],
+      title: 'Passenger App',
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+      ),
+      home: const PassengerScreen(),
+    );
+  }
+}
+
+class PassengerScreen extends StatefulWidget {
+  const PassengerScreen({super.key});
+
+  @override
+  State<PassengerScreen> createState() => _PassengerScreenState();
+}
+
+class _PassengerScreenState extends State<PassengerScreen> {
+  final TextEditingController _targetIdController = TextEditingController();
+  StreamSubscription<DocumentSnapshot>? _targetSubscription;
+  Map<String, dynamic>? _targetData;
+  String? _currentTargetId;
+  bool _isListening = false;
+
+  @override
+  void dispose() {
+    _targetSubscription?.cancel();
+    _targetIdController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _showNotification(String title, String body) async {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics =
+        AndroidNotificationDetails(
+      'bus_arrival',
+      'Bus Arrival Notifications',
+      channelDescription: 'Notifications when bus reaches destination',
+      importance: Importance.max,
+      priority: Priority.high,
+      showWhen: false,
+    );
+    
+    const NotificationDetails platformChannelSpecifics =
+        NotificationDetails(android: androidPlatformChannelSpecifics);
+    
+    await flutterLocalNotificationsPlugin.show(
+      0,
+      title,
+      body,
+      platformChannelSpecifics,
+    );
+  }
+
+  void _startListening() {
+    final targetId = _targetIdController.text.trim();
+    if (targetId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a target ID')),
+      );
+      return;
+    }
+
+    _targetSubscription?.cancel();
+    
+    _targetSubscription = FirebaseFirestore.instance
+        .collection('targets')
+        .doc(targetId)
+        .snapshots()
+        .listen(
+      (DocumentSnapshot snapshot) {
+        if (snapshot.exists) {
+          final data = snapshot.data() as Map<String, dynamic>;
+          setState(() {
+            _targetData = data;
+          });
+          
+          // Show notification when reached becomes true
+          if (data['reached'] == true && _isListening) {
+            _showNotification(
+              'Bus Arrived!',
+              'The bus has reached ${data['name']}',
+            );
+          }
+        } else {
+          setState(() {
+            _targetData = null;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Target not found')),
+          );
+        }
+      },
+      onError: (error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $error')),
+        );
+      },
+    );
+
+    setState(() {
+      _currentTargetId = targetId;
+      _isListening = true;
+    });
+  }
+
+  void _stopListening() {
+    _targetSubscription?.cancel();
+    setState(() {
+      _isListening = false;
+      _currentTargetId = null;
+      _targetData = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Passenger App'),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Target ID Input
+            TextField(
+              controller: _targetIdController,
+              decoration: const InputDecoration(
+                labelText: 'Target ID',
+                border: OutlineInputBorder(),
+                hintText: 'Enter the target ID from bus app',
+              ),
             ),
-          ),
+            const SizedBox(height: 16),
+            
+            // Listen/Stop Button
+            ElevatedButton.icon(
+              onPressed: _isListening ? _stopListening : _startListening,
+              icon: Icon(_isListening ? Icons.stop : Icons.play_arrow),
+              label: Text(_isListening ? 'Stop Listening' : 'Start Listening'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _isListening ? Colors.red : Colors.green,
+                foregroundColor: Colors.white,
+              ),
+            ),
+            
+            const SizedBox(height: 24),
+            
+            // Status Card
+            if (_isListening) ..[
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Listening to: $_currentTargetId',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      if (_targetData != null) ..[
+                        Text('Target: ${_targetData!['name']}'),
+                        Text(
+                          'Status: ${_targetData!['reached'] ? 'Reached ✅' : 'Not Reached ⏳'}',
+                          style: TextStyle(
+                            color: _targetData!['reached'] ? Colors.green : Colors.orange,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (_targetData!['reachedAt'] != null)
+                          Text(
+                            'Reached at: ${(_targetData!['reachedAt'] as Timestamp).toDate()}',
+                          ),
+                      ] else
+                        const Text('Loading target data...'),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            
+            const SizedBox(height: 24),
+            
+            // Instructions
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'How to use:',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                    SizedBox(height: 8),
+                    Text('1. Get the Target ID from the bus driver'),
+                    Text('2. Enter the Target ID above'),
+                    Text('3. Tap "Start Listening"'),
+                    Text('4. You\'ll get a notification when the bus arrives'),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

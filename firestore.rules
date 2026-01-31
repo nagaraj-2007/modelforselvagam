@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow read and write access to targets collection for testing
+    match /targets/{document} {
+      allow read, write: if true;
+    }
+  }
+}
