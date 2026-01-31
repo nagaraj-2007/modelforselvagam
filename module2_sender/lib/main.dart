@@ -323,7 +323,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                   const SizedBox(height: 16),
                   
                   // Selected Target Info
-                  if (_selectedTarget != null) ..[
+                  if (_selectedTarget != null) ...[
                     Card(
                       child: Padding(
                         padding: const EdgeInsets.all(16),

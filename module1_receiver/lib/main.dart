@@ -2,27 +2,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'firebase_options.dart';
-
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-    FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  await _initializeNotifications();
   runApp(const MyApp());
-}
-
-Future<void> _initializeNotifications() async {
-  const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-  
-  const InitializationSettings initializationSettings =
-      InitializationSettings(android: initializationSettingsAndroid);
-  
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
 }
 
 class MyApp extends StatelessWidget {
@@ -55,6 +40,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
   Map<String, dynamic>? _targetData;
   String? _currentTargetId;
   bool _isListening = false;
+  bool _hasNotified = false;
 
   @override
   void dispose() {
@@ -63,25 +49,19 @@ class _PassengerScreenState extends State<PassengerScreen> {
     super.dispose();
   }
 
-  Future<void> _showNotification(String title, String body) async {
-    const AndroidNotificationDetails androidPlatformChannelSpecifics =
-        AndroidNotificationDetails(
-      'bus_arrival',
-      'Bus Arrival Notifications',
-      channelDescription: 'Notifications when bus reaches destination',
-      importance: Importance.max,
-      priority: Priority.high,
-      showWhen: false,
-    );
-    
-    const NotificationDetails platformChannelSpecifics =
-        NotificationDetails(android: androidPlatformChannelSpecifics);
-    
-    await flutterLocalNotificationsPlugin.show(
-      0,
-      title,
-      body,
-      platformChannelSpecifics,
+  void _showArrivalDialog(String targetName) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('🚌 Bus Arrived!'),
+        content: Text('The bus has reached $targetName'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -95,6 +75,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
     }
 
     _targetSubscription?.cancel();
+    _hasNotified = false;
     
     _targetSubscription = FirebaseFirestore.instance
         .collection('targets')
@@ -108,11 +89,15 @@ class _PassengerScreenState extends State<PassengerScreen> {
             _targetData = data;
           });
           
-          // Show notification when reached becomes true
-          if (data['reached'] == true) {
-            _showNotification(
-              'Bus Arrived!',
-              'The bus has reached ${data['name']}',
+          // Show dialog when reached becomes true (only once)
+          if (data['reached'] == true && !_hasNotified) {
+            _hasNotified = true;
+            _showArrivalDialog(data['name']);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('🚌 Bus arrived at ${data['name']}!'),
+                backgroundColor: Colors.green,
+              ),
             );
           }
         } else {
@@ -143,6 +128,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
       _isListening = false;
       _currentTargetId = null;
       _targetData = null;
+      _hasNotified = false;
     });
   }
 
@@ -159,7 +145,6 @@ class _PassengerScreenState extends State<PassengerScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Target ID Input
             TextField(
               controller: _targetIdController,
               decoration: const InputDecoration(
@@ -170,7 +155,6 @@ class _PassengerScreenState extends State<PassengerScreen> {
             ),
             const SizedBox(height: 16),
             
-            // Listen/Stop Button
             ElevatedButton.icon(
               onPressed: _isListening ? _stopListening : _startListening,
               icon: Icon(_isListening ? Icons.stop : Icons.play_arrow),
@@ -183,8 +167,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
             
             const SizedBox(height: 24),
             
-            // Status Card
-            if (_isListening) ..[
+            if (_isListening) ...[
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -196,7 +179,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 8),
-                      if (_targetData != null) ..[
+                      if (_targetData != null) ...[
                         Text('Target: ${_targetData!['name']}'),
                         Text(
                           'Status: ${_targetData!['reached'] ? 'Reached ✅' : 'Not Reached ⏳'}',
@@ -219,7 +202,6 @@ class _PassengerScreenState extends State<PassengerScreen> {
             
             const SizedBox(height: 24),
             
-            // Instructions
             const Card(
               child: Padding(
                 padding: EdgeInsets.all(16),
@@ -234,7 +216,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
                     Text('1. Get the Target ID from the bus driver'),
                     Text('2. Enter the Target ID above'),
                     Text('3. Tap "Start Listening"'),
-                    Text('4. You\'ll get a notification when the bus arrives'),
+                    Text('4. You\'ll get a popup when the bus arrives'),
                   ],
                 ),
               ),
