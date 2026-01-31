@@ -7,6 +7,11 @@ import 'firebase_options.dart';
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  print('=== BACKGROUND FCM RECEIVED ===');
+  print('Title: ${message.notification?.title}');
+  print('Body: ${message.notification?.body}');
+  print('Data: ${message.data}');
+  
   // Ensure we can use plugins in background
   WidgetsFlutterBinding.ensureInitialized();
   
@@ -115,11 +120,14 @@ class _MyAppState extends State<MyApp> {
 
     _token = await FirebaseMessaging.instance.getToken();
     print('FCM Token: $_token');
-    if (mounted) setState(() {});
+    if (mounted) setState(() {});   
     
     // Foreground handler
     FirebaseMessaging.onMessage.listen((message) {
-      print('Foreground Message Received');
+      print('=== FOREGROUND FCM RECEIVED ===');
+      print('Title: ${message.notification?.title}');
+      print('Body: ${message.notification?.body}');
+      print('Data: ${message.data}');
       
       String title = message.notification?.title ?? "Notification";
       String body = message.notification?.body ?? "";
@@ -132,6 +140,7 @@ class _MyAppState extends State<MyApp> {
       }
 
       String fullText = "$title. $body";
+      print('Speaking: $fullText');
       
       if (mounted) {
         setState(() {

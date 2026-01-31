@@ -34,15 +34,16 @@ class BackgroundService {
     await service.configure(
       androidConfiguration: AndroidConfiguration(
         onStart: onStart,
-        autoStart: false,
+        autoStart: true,
+        autoStartOnBoot: true,
         isForegroundMode: true,
         notificationChannelId: notificationChannelId,
         initialNotificationTitle: 'Bus Tracking Active',
         initialNotificationContent: 'Monitoring location...',
         foregroundServiceNotificationId: notificationId,
       ),
-      iosConfiguration: IosConfiguration(
-        autoStart: false,
+        iosConfiguration: IosConfiguration(
+        autoStart: true,
         onForeground: onStart,
         onBackground: (instance) => true,
       ),
@@ -96,10 +97,10 @@ class BackgroundService {
 
     lastStatus = "GPS enabled, waiting for fix...";
 
-    // High accuracy location tracking
+    // High accuracy location tracking with 20m distance filter
     const LocationSettings locationSettings = LocationSettings(
       accuracy: LocationAccuracy.high,
-      distanceFilter: 0,
+      distanceFilter: 20,
     );
 
     bool isFirstUpdate = true;
@@ -113,6 +114,7 @@ class BackgroundService {
         
         lastStatus = "Tracking: ${position.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)}";
         _checkTargetLocation(position, service, notificationPlugin);
+        _sendCurrentLocationPeriodically(position, service, notificationPlugin);
       },
       onError: (error) {
         lastStatus = "GPS ERROR: $error";
@@ -125,21 +127,28 @@ class BackgroundService {
       final prefs = await SharedPreferences.getInstance();
       await prefs.reload();
       
-      final targetLocJson = prefs.getString('targetLocation');
+      final targetLocsJson = prefs.getString('targetLocations');
+      final selectedTargetIndex = prefs.getInt('selectedTargetIndex');
       final fcmToken = prefs.getString('fcmToken');
       final serviceAccountJson = prefs.getString('serviceAccountJson');
-      final targetReached = prefs.getBool('targetReached') ?? false;
 
-      if (targetLocJson == null || fcmToken == null || serviceAccountJson == null) {
+      print("DEBUG: Current position: ${position.latitude}, ${position.longitude}");
+      print("DEBUG: targetLocsJson exists: ${targetLocsJson != null}");
+      print("DEBUG: selectedTargetIndex: $selectedTargetIndex");
+      print("DEBUG: fcmToken exists: ${fcmToken != null}");
+      print("DEBUG: serviceAccountJson exists: ${serviceAccountJson != null}");
+
+      if (targetLocsJson == null || selectedTargetIndex == null || fcmToken == null || serviceAccountJson == null) {
+        print("DEBUG: Missing required data - exiting");
         return;
       }
 
-      if (targetReached) {
-        return; // Already reached, don't check again
+      final List<dynamic> targetLocations = jsonDecode(targetLocsJson);
+      if (selectedTargetIndex >= targetLocations.length) {
+        return;
       }
 
-      Map<String, dynamic> targetLocation = jsonDecode(targetLocJson);
-      double targetRadius = 150.0; // 150 meters
+      Map<String, dynamic> targetLocation = Map<String, dynamic>.from(targetLocations[selectedTargetIndex]);
 
       double distance = Geolocator.distanceBetween(
         position.latitude,
@@ -148,35 +157,49 @@ class BackgroundService {
         targetLocation['lng'],
       );
 
-      // Show proximity alert
-      if (distance < 300) {
-        notificationPlugin.show(
-          999,
-          "Approaching Target!",
-          "Distance: ${distance.toStringAsFixed(0)}m (will notify at 150m)",
-          const NotificationDetails(
-            android: AndroidNotificationDetails(
-              notificationChannelId,
-              'Alerts',
-              importance: Importance.max,
-              priority: Priority.max,
-            )
-          ),
-        );
-      }
+      print("DEBUG: Distance to target: ${distance.toStringAsFixed(1)}m");
+      print("DEBUG: Target already reached: ${targetLocation['reached']}");
 
-      // Check if target reached
-      if (distance <= targetRadius) {
-        // Mark as reached
-        await prefs.setBool('targetReached', true);
-        targetLocation['reached'] = true;
-        await prefs.setString('targetLocation', jsonEncode(targetLocation));
+      // Check if within 100 meters
+      if (distance <= 100.0) {
+        print("DEBUG: Within 100m! Checking if already reached...");
+        
+        // Check if already reached to prevent repeated triggers
+        if (targetLocation['reached'] == true) {
+          print("DEBUG: Target already reached - skipping notification");
+          return; // Already notified, don't send again
+        }
+        
+        print("DEBUG: Target not reached yet - checking cooldown...");
+        
+        // Check cooldown - send every 5 seconds while in range
+        final lastNotificationTime = prefs.getInt('lastNotificationTime') ?? 0;
+        final currentTime = DateTime.now().millisecondsSinceEpoch;
+        
+        print("DEBUG: Cooldown check - Last: $lastNotificationTime, Current: $currentTime");
+        
+        if (currentTime - lastNotificationTime < 5000) {
+          print("DEBUG: Still in cooldown - skipping");
+          return; // Still in cooldown period
+        }
+        
+        print("DEBUG: Sending FCM notification now!");
+        
+        // Mark as reached to prevent repeated triggers
+        targetLocations[selectedTargetIndex]['reached'] = true;
+        await prefs.setString('targetLocations', jsonEncode(targetLocations));
+        
+        // Update last notification time
+        await prefs.setInt('lastNotificationTime', currentTime);
+        
+        // Send FCM notification
+        await _sendFCM(serviceAccountJson, fcmToken, targetLocation['name']);
         
         // Show local notification
         notificationPlugin.show(
           1000,
           "TARGET REACHED!",
-          "Sending notification to passengers...",
+          "Within 100m of ${targetLocation['name']} - Notification sent",
           const NotificationDetails(
             android: AndroidNotificationDetails(
               notificationChannelId, 
@@ -186,12 +209,8 @@ class BackgroundService {
             )
           ),
         );
-        
-        // Send FCM notification
-        await _sendFCM(serviceAccountJson, fcmToken, targetLocation['name']);
-        
-        // Notify UI
-        service.invoke("update", {"targetReached": true});
+      } else {
+        print("DEBUG: Outside 100m range - distance: ${distance.toStringAsFixed(1)}m");
       }
     } catch (e) {
       notificationPlugin.show(
@@ -205,6 +224,43 @@ class BackgroundService {
           )
         ),
       );
+    }
+  }
+
+  static Future<void> sendCurrentLocation(String serviceAccountJson, String fcmToken, Position position) async {
+    try {
+      final serviceAccount = jsonDecode(serviceAccountJson);
+      final credentials = ServiceAccountCredentials.fromJson(serviceAccount);
+      final client = await clientViaServiceAccount(
+        credentials,
+        ['https://www.googleapis.com/auth/firebase.messaging'],
+      );
+
+      final response = await client.post(
+        Uri.parse('https://fcm.googleapis.com/v1/projects/${serviceAccount['project_id']}/messages:send'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'message': {
+            'token': fcmToken,
+            'notification': {
+              'title': 'Bus Current Location',
+              'body': 'Lat: ${position.latitude.toStringAsFixed(6)}, Lng: ${position.longitude.toStringAsFixed(6)}',
+            },
+            'data': {
+              'type': 'current_location',
+              'latitude': position.latitude.toString(),
+              'longitude': position.longitude.toString(),
+            },
+            'android': {
+              'priority': 'high',
+            }
+          },
+        }),
+      );
+
+      client.close();
+    } catch (e) {
+      throw Exception('Failed to send location: $e');
     }
   }
 
@@ -259,6 +315,47 @@ class BackgroundService {
       notificationPlugin.show(
         996,
         "FCM Error",
+        e.toString(),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            notificationChannelId,
+            'Errors',
+          )
+        ),
+      );
+    }
+  }
+
+  static Future<void> _sendCurrentLocationPeriodically(Position position, ServiceInstance service, FlutterLocalNotificationsPlugin notificationPlugin) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      
+      final fcmToken = prefs.getString('fcmToken');
+      final serviceAccountJson = prefs.getString('serviceAccountJson');
+      
+      if (fcmToken == null || serviceAccountJson == null) {
+        return;
+      }
+      
+      // Check cooldown for current location notifications
+      final lastCurrentLocationTime = prefs.getInt('lastCurrentLocationTime') ?? 0;
+      final currentTime = DateTime.now().millisecondsSinceEpoch;
+      
+      if (currentTime - lastCurrentLocationTime < 5000) {
+        return; // Still in cooldown period
+      }
+      
+      // Update last current location notification time
+      await prefs.setInt('lastCurrentLocationTime', currentTime);
+      
+      // Send current location FCM notification
+      await sendCurrentLocation(serviceAccountJson, fcmToken, position);
+      
+    } catch (e) {
+      notificationPlugin.show(
+        995,
+        "Current Location Error",
         e.toString(),
         const NotificationDetails(
           android: AndroidNotificationDetails(

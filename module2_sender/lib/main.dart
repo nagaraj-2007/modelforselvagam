@@ -57,16 +57,39 @@ class _MainScreenState extends State<MainScreen> {
   
   final TextEditingController _tokenController = TextEditingController();
   
-  Map<String, dynamic>? _startLocation;
-  Map<String, dynamic>? _targetLocation;
+  List<Map<String, dynamic>> _targetLocations = [];
+  int? _selectedTargetIndex;
 
   @override
   void initState() {
     super.initState();
     _stopAnyExistingService(); // Stop any service from previous session
+    _requestInitialPermissions(); // Request permissions at startup
     _loadStoredData();
     _startStatusPoller();
     _getCurrentLocation();
+  }
+
+  Future<void> _requestInitialPermissions() async {
+    try {
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Location permission is required. Please enable it in app settings.'),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('Permission request error: $e');
+    }
   }
 
   Future<void> _stopAnyExistingService() async {
@@ -87,11 +110,12 @@ class _MainScreenState extends State<MainScreen> {
     _statusTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
       final prefs = await SharedPreferences.getInstance();
       
-      // Check if target was reached
-      final targetReached = prefs.getBool('targetReached') ?? false;
-      if (targetReached && _targetLocation != null) {
+      // Check if any target was reached and update UI
+      final targetLocsJson = prefs.getString('targetLocations');
+      if (targetLocsJson != null) {
+        final List<dynamic> targets = jsonDecode(targetLocsJson);
         setState(() {
-          _targetLocation!['reached'] = true;
+          _targetLocations = targets.map((e) => Map<String, dynamic>.from(e)).toList();
         });
       }
       
@@ -107,6 +131,19 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _getCurrentLocation() async {
     try {
+      // Request permissions first
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          return;
+        }
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        return;
+      }
+
       Position pos = await Geolocator.getCurrentPosition();
       setState(() => _currentPosition = pos);
       _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(pos.latitude, pos.longitude), 15));
@@ -127,9 +164,13 @@ class _MainScreenState extends State<MainScreen> {
       if (bgStatus.isDenied) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Background location is required. Please select "Allow all the time" in settings.'),
-              duration: Duration(seconds: 5),
+            SnackBar(
+              content: const Text('Background location is required. Please select "Allow all the time" in settings.'),
+              duration: const Duration(seconds: 5),
+              action: SnackBarAction(
+                label: 'Settings',
+                onPressed: () => openAppSettings(),
+              ),
             ),
           );
         }
@@ -137,6 +178,52 @@ class _MainScreenState extends State<MainScreen> {
     }
     
     await Permission.notification.request();
+    
+    // Check battery optimization
+    _checkBatteryOptimization();
+  }
+  
+  Future<void> _checkBatteryOptimization() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasShownDialog = prefs.getBool('batteryOptimizationDialogShown') ?? false;
+    
+    if (!hasShownDialog && mounted) {
+      await prefs.setBool('batteryOptimizationDialogShown', true);
+      
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.battery_alert, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('Important Setup'),
+            ],
+          ),
+          content: const Text(
+            'Your phone may stop background tracking and notifications to save battery.\n\n'
+            'To ensure you receive notifications when the bus arrives, please disable battery optimization for this app.\n\n'
+            'Steps:\n'
+            '1. Tap "Open Settings" below\n'
+            '2. Find "Battery" or "Battery optimization"\n'
+            '3. Select "Don\'t optimize" or "Allow"'
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Later'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                openAppSettings();
+              },
+              child: const Text('Open Settings'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   Future<void> _loadStoredData() async {
@@ -146,18 +233,17 @@ class _MainScreenState extends State<MainScreen> {
        _tokenController.text = storedToken;
     }
     
-    final startLocJson = prefs.getString('startLocation');
-    if (startLocJson != null) {
+    final targetLocsJson = prefs.getString('targetLocations');
+    if (targetLocsJson != null) {
+      final List<dynamic> decoded = jsonDecode(targetLocsJson);
       setState(() {
-        _startLocation = Map<String, dynamic>.from(jsonDecode(startLocJson));
+        _targetLocations = decoded.map((e) => Map<String, dynamic>.from(e)).toList();
       });
     }
     
-    final targetLocJson = prefs.getString('targetLocation');
-    if (targetLocJson != null) {
-      setState(() {
-        _targetLocation = Map<String, dynamic>.from(jsonDecode(targetLocJson));
-      });
+    final storedIndex = prefs.getInt('selectedTargetIndex');
+    if (storedIndex != null && storedIndex < _targetLocations.length) {
+      _selectedTargetIndex = storedIndex;
     }
   }
 
@@ -165,13 +251,9 @@ class _MainScreenState extends State<MainScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('fcmToken', _tokenController.text.trim());
     
-    if (_startLocation != null) {
-      await prefs.setString('startLocation', jsonEncode(_startLocation));
-    }
-    
-    if (_targetLocation != null) {
-      await prefs.setString('targetLocation', jsonEncode(_targetLocation));
-      await prefs.setBool('targetReached', _targetLocation!['reached'] ?? false);
+    await prefs.setString('targetLocations', jsonEncode(_targetLocations));
+    if (_selectedTargetIndex != null) {
+      await prefs.setInt('selectedTargetIndex', _selectedTargetIndex!);
     }
     
     try {
@@ -182,86 +264,78 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  Future<void> _setStartLocation() async {
-    try {
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.best,
-      );
-      
-      setState(() {
-        _startLocation = {
-          'name': 'Start Location',
-          'lat': position.latitude,
-          'lng': position.longitude,
-        };
-        _currentPosition = position;
+  Future<void> _addTargetAtLocation(LatLng position) async {
+    String? name = await _showNameDialog('Target ${_targetLocations.length + 1}');
+    if (name == null) return;
+    
+    setState(() {
+      _targetLocations.add({
+        'name': name,
+        'lat': position.latitude,
+        'lng': position.longitude,
+        'reached': false,
       });
-      
-      await _saveData();
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Start Location Saved: ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-      
-      _mapController?.animateCamera(
-        CameraUpdate.newLatLngZoom(
-          LatLng(position.latitude, position.longitude),
-          16,
+    });
+    
+    await _saveData();
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Target "$name" added at ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}'),
+          duration: const Duration(seconds: 3),
         ),
       );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-      }
     }
   }
 
-  Future<void> _setTargetLocation() async {
-    try {
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.best,
-      );
-      
-      setState(() {
-        _targetLocation = {
-          'name': 'Target Location',
-          'lat': position.latitude,
-          'lng': position.longitude,
-          'reached': false,
-        };
-        _currentPosition = position;
-      });
-      
-      await _saveData();
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Target Location Saved: ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-      
-      _mapController?.animateCamera(
-        CameraUpdate.newLatLngZoom(
-          LatLng(position.latitude, position.longitude),
-          16,
+  Future<String?> _showNameDialog(String defaultName) async {
+    TextEditingController nameController = TextEditingController(text: defaultName);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Enter Location Name'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(labelText: 'Name'),
         ),
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, nameController.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteTarget(int index) {
+    setState(() {
+      _targetLocations.removeAt(index);
+      if (_selectedTargetIndex == index) {
+        _selectedTargetIndex = null;
+      } else if (_selectedTargetIndex != null && _selectedTargetIndex! > index) {
+        _selectedTargetIndex = _selectedTargetIndex! - 1;
       }
+      // Reset if selected index is now out of bounds
+      if (_selectedTargetIndex != null && _selectedTargetIndex! >= _targetLocations.length) {
+        _selectedTargetIndex = null;
+      }
+    });
+    _saveData();
+  }
+
+  Future<void> _editTarget(int index) async {
+    String? newName = await _showNameDialog(_targetLocations[index]['name']);
+    if (newName != null && newName.isNotEmpty) {
+      setState(() {
+        _targetLocations[index]['name'] = newName;
+      });
+      _saveData();
     }
   }
 
@@ -278,9 +352,9 @@ class _MainScreenState extends State<MainScreen> {
         return;
       }
 
-      if (_targetLocation == null) {
+      if (_selectedTargetIndex == null || _targetLocations.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Please set Target Location first')),
+          const SnackBar(content: Text('Please select a target location first')),
         );
         return;
       }
@@ -293,20 +367,57 @@ class _MainScreenState extends State<MainScreen> {
       setState(() => _isBackgroundTracking = true);
       
       // If already at target location, trigger immediately
-      if (_currentPosition != null && _targetLocation != null) {
+      if (_currentPosition != null && _selectedTargetIndex != null) {
+        final target = _targetLocations[_selectedTargetIndex!];
         double distance = Geolocator.distanceBetween(
           _currentPosition!.latitude,
           _currentPosition!.longitude,
-          _targetLocation!['lat'],
-          _targetLocation!['lng'],
+          target['lat'],
+          target['lng'],
         );
         
-        if (distance <= 150) {
+        if (distance <= 100) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Already at target! Distance: ${distance.toStringAsFixed(0)}m - Notification will be sent automatically')),
+            SnackBar(content: Text('Already at ${target['name']}! Distance: ${distance.toStringAsFixed(0)}m - Notification will be sent automatically')),
           );
         }
       }
+    }
+  }
+
+  Future<void> _sendCurrentLocation() async {
+    final token = _tokenController.text.trim();
+    if (token.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Token required')));
+      return;
+    }
+
+    try {
+      // Request permissions first
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          throw Exception('Location permissions are denied');
+        }
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        throw Exception('Location permissions are permanently denied');
+      }
+
+      Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      final serviceAccountJson = await rootBundle.loadString('assets/service-account-key.json');
+      
+      await BackgroundService.sendCurrentLocation(serviceAccountJson, token, position);
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Current location sent: ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}')),
+        );
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -353,15 +464,15 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  void _resetLocations() {
+  void _clearAllTargets() {
     setState(() {
-      _startLocation = null;
-      _targetLocation = null;
+      _targetLocations.clear();
+      _selectedTargetIndex = null;
     });
     _saveData();
     
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Locations cleared')),
+      const SnackBar(content: Text('All targets cleared')),
     );
   }
 
@@ -369,22 +480,16 @@ class _MainScreenState extends State<MainScreen> {
   Widget build(BuildContext context) {
     Set<Marker> markers = {};
     
-    if (_startLocation != null) {
+    for (int i = 0; i < _targetLocations.length; i++) {
+      final target = _targetLocations[i];
       markers.add(Marker(
-        markerId: const MarkerId('start'),
-        position: LatLng(_startLocation!['lat'], _startLocation!['lng']),
-        infoWindow: const InfoWindow(title: 'Start Location'),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-      ));
-    }
-    
-    if (_targetLocation != null) {
-      markers.add(Marker(
-        markerId: const MarkerId('target'),
-        position: LatLng(_targetLocation!['lat'], _targetLocation!['lng']),
-        infoWindow: const InfoWindow(title: 'Target Location'),
+        markerId: MarkerId('target_$i'),
+        position: LatLng(target['lat'], target['lng']),
+        infoWindow: InfoWindow(title: target['name']),
         icon: BitmapDescriptor.defaultMarkerWithHue(
-          _targetLocation!['reached'] == true ? BitmapDescriptor.hueOrange : BitmapDescriptor.hueRed,
+          i == _selectedTargetIndex 
+            ? (target['reached'] == true ? BitmapDescriptor.hueOrange : BitmapDescriptor.hueBlue)
+            : BitmapDescriptor.hueRed,
         ),
       ));
     }
@@ -396,9 +501,9 @@ class _MainScreenState extends State<MainScreen> {
         backgroundColor: Theme.of(context).colorScheme.primary,
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.white),
-            onPressed: _resetLocations,
-            tooltip: 'Clear All',
+            icon: const Icon(Icons.clear_all, color: Colors.white),
+            onPressed: _clearAllTargets,
+            tooltip: 'Clear All Targets',
           ),
         ],
       ),
@@ -418,6 +523,7 @@ class _MainScreenState extends State<MainScreen> {
               markers: markers,
               myLocationEnabled: true,
               myLocationButtonEnabled: true,
+              onLongPress: _addTargetAtLocation,
             ),
           ),
           
@@ -452,68 +558,94 @@ class _MainScreenState extends State<MainScreen> {
                   
                   const SizedBox(height: 16),
                   
-                  // Location Buttons
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _setStartLocation,
-                          icon: const Icon(Icons.play_circle),
-                          label: const Text('Set Start'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.all(16),
+
+                  // Target Locations List
+                  if (_targetLocations.isNotEmpty) ...[
+                    const Text('Target Locations:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 8),
+                  ],
+                  if (_targetLocations.isNotEmpty)
+                    ..._targetLocations.asMap().entries.map((entry) {
+                      int index = entry.key;
+                      Map<String, dynamic> target = entry.value;
+                      bool isSelected = index == _selectedTargetIndex;
+                      
+                      return Card(
+                        color: isSelected 
+                          ? (target['reached'] == true ? Colors.orange[50] : Colors.blue[50])
+                          : Colors.grey[50],
+                        child: ListTile(
+                          leading: Icon(
+                            target['reached'] == true ? Icons.check_circle : Icons.location_on,
+                            color: isSelected 
+                              ? (target['reached'] == true ? Colors.orange : Colors.blue)
+                              : Colors.grey,
+                          ),
+                          title: Text(target['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text('Lat: ${target['lat'].toStringAsFixed(6)}\nLng: ${target['lng'].toStringAsFixed(6)}'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (_currentPosition != null && target['reached'] != true)
+                                Text(
+                                  '${Geolocator.distanceBetween(_currentPosition!.latitude, _currentPosition!.longitude, target['lat'], target['lng']).toStringAsFixed(0)}m',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                ),
+                              const SizedBox(width: 8),
+                              ElevatedButton(
+                                onPressed: () async {
+                                  setState(() {
+                                    _selectedTargetIndex = index;
+                                  });
+                                  await _saveData();
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('Selected ${target['name']} as target')),
+                                  );
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: isSelected ? Colors.orange : Colors.green,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                ),
+                                child: Text(isSelected ? 'Selected' : 'Select', style: const TextStyle(fontSize: 12)),
+                              ),
+                              PopupMenuButton(
+                                itemBuilder: (context) => [
+                                  PopupMenuItem(
+                                    value: 'select',
+                                    child: Text(isSelected ? 'Deselect' : 'Select'),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'edit',
+                                    child: Text('Edit Name'),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'delete',
+                                    child: Text('Delete'),
+                                  ),
+                                ],
+                                onSelected: (value) {
+                                  switch (value) {
+                                    case 'select':
+                                      setState(() {
+                                        _selectedTargetIndex = isSelected ? null : index;
+                                      });
+                                      _saveData();
+                                      break;
+                                    case 'edit':
+                                      _editTarget(index);
+                                      break;
+                                    case 'delete':
+                                      _deleteTarget(index);
+                                      break;
+                                  }
+                                },
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _setTargetLocation,
-                          icon: const Icon(Icons.location_on),
-                          label: const Text('Set Target'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.red,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.all(16),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  
-                  const SizedBox(height: 16),
-                  
-                  // Status Cards
-                  if (_startLocation != null)
-                    Card(
-                      color: Colors.green[50],
-                      child: ListTile(
-                        leading: const Icon(Icons.play_circle, color: Colors.green),
-                        title: const Text('Start Location', style: TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Text('Lat: ${_startLocation!['lat'].toStringAsFixed(6)}\nLng: ${_startLocation!['lng'].toStringAsFixed(6)}'),
-                      ),
-                    ),
-                  
-                  if (_targetLocation != null)
-                    Card(
-                      color: _targetLocation!['reached'] == true ? Colors.orange[50] : Colors.red[50],
-                      child: ListTile(
-                        leading: Icon(
-                          _targetLocation!['reached'] == true ? Icons.check_circle : Icons.location_on,
-                          color: _targetLocation!['reached'] == true ? Colors.orange : Colors.red,
-                        ),
-                        title: const Text('Target Location', style: TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Text('Lat: ${_targetLocation!['lat'].toStringAsFixed(6)}\nLng: ${_targetLocation!['lng'].toStringAsFixed(6)}'),
-                        trailing: _currentPosition != null && _targetLocation!['reached'] != true
-                          ? Text(
-                              '${Geolocator.distanceBetween(_currentPosition!.latitude, _currentPosition!.longitude, _targetLocation!['lat'], _targetLocation!['lng']).toStringAsFixed(0)}m',
-                              style: const TextStyle(fontWeight: FontWeight.bold),
-                            )
-                          : null,
-                      ),
-                    ),
+                      );
+                    }).toList(),
                   
                   const SizedBox(height: 16),
                   
@@ -532,17 +664,84 @@ class _MainScreenState extends State<MainScreen> {
                   const SizedBox(height: 8),
                   
                   OutlinedButton.icon(
-                    onPressed: _sendTestNotification,
-                    icon: const Icon(Icons.send),
-                    label: const Text('Send Test Notification'),
+                    onPressed: _sendCurrentLocation,
+                    icon: const Icon(Icons.my_location),
+                    label: const Text('Send Current Location'),
+                  ),
+                  
+                  const SizedBox(height: 8),
+                  
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      try {
+                        Position position = await Geolocator.getCurrentPosition();
+                        // Create target 10 meters away (very close for testing)
+                        double testLat = position.latitude + 0.00009; // ~10m north
+                        double testLng = position.longitude;
+                        
+                        setState(() {
+                          _targetLocations.add({
+                            'name': 'Test Target (10m away)',
+                            'lat': testLat,
+                            'lng': testLng,
+                            'reached': false,
+                          });
+                          _selectedTargetIndex = _targetLocations.length - 1;
+                        });
+                        
+                        await _saveData();
+                        
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Test target created 10m away and selected')),
+                        );
+                        
+                        _mapController?.animateCamera(
+                          CameraUpdate.newLatLngZoom(
+                            LatLng(position.latitude, position.longitude),
+                            18,
+                          ),
+                        );
+                      } catch (e) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Error: $e')),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.add_location_alt),
+                    label: const Text('Add Test Target (10m away)'),
+                  ),
+                  
+                  const SizedBox(height: 8),
+                  
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      if (_selectedTargetIndex != null && _selectedTargetIndex! < _targetLocations.length) {
+                        final target = _targetLocations[_selectedTargetIndex!];
+                        try {
+                          final serviceAccountJson = await rootBundle.loadString('assets/service-account-key.json');
+                          await BackgroundService.sendCurrentLocation(serviceAccountJson, _tokenController.text.trim(), _currentPosition!);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Force notification sent for ${target['name']}')),
+                          );
+                        } catch (e) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Error: $e')),
+                          );
+                        }
+                      }
+                    },
+                    icon: const Icon(Icons.notification_important),
+                    label: const Text('Force Send Target Notification'),
                   ),
                   
                   const SizedBox(height: 8),
                   
                   Text(
                     _isBackgroundTracking 
-                      ? 'Tracking active. Notification will be sent when bus reaches target.'
-                      : 'Set locations and start tracking to enable automatic notifications.',
+                      ? (_selectedTargetIndex != null && _selectedTargetIndex! < _targetLocations.length
+                          ? 'Tracking active. Notification will be sent when reaching "${_targetLocations[_selectedTargetIndex!]['name']}".'
+                          : 'Tracking active but no target selected.')
+                      : 'Long press on map to add targets, select one, and start tracking.',
                     style: TextStyle(color: Colors.grey[600], fontSize: 12),
                     textAlign: TextAlign.center,
                   ),
