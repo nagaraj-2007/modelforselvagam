@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'firebase_options.dart';
 
 void main() async {
@@ -41,12 +42,32 @@ class _PassengerScreenState extends State<PassengerScreen> {
   String? _currentTargetId;
   bool _isListening = false;
   bool _hasNotified = false;
+  
+  final FlutterTts _tts = FlutterTts();
+
+  @override
+  void initState() {
+    super.initState();
+    _initTts();
+  }
+
+  Future<void> _initTts() async {
+    await _tts.setLanguage("en-US");
+    await _tts.setSpeechRate(0.5);
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(1.0);
+  }
 
   @override
   void dispose() {
     _targetSubscription?.cancel();
     _targetIdController.dispose();
+    _tts.stop();
     super.dispose();
+  }
+
+  Future<void> _speak(String text) async {
+    await _tts.speak(text);
   }
 
   void _showArrivalDialog(String targetName) {
@@ -93,6 +114,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
           if (data['reached'] == true && !_hasNotified) {
             _hasNotified = true;
             _showArrivalDialog(data['name']);
+            _speak('Your bus has reached ${data['name']}. Please get ready.');
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text('🚌 Bus arrived at ${data['name']}!'),
@@ -200,6 +222,13 @@ class _PassengerScreenState extends State<PassengerScreen> {
               ),
             ],
             
+            // Test TTS Button
+            OutlinedButton.icon(
+              onPressed: () => _speak('Test message: Your bus will reach in a few minutes.'),
+              icon: const Icon(Icons.volume_up),
+              label: const Text('Test Voice'),
+            ),
+            
             const SizedBox(height: 24),
             
             const Card(
@@ -216,7 +245,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
                     Text('1. Get the Target ID from the bus driver'),
                     Text('2. Enter the Target ID above'),
                     Text('3. Tap "Start Listening"'),
-                    Text('4. You\'ll get a popup when the bus arrives'),
+                    Text('4. You\'ll get a popup and voice announcement when the bus arrives'),
                   ],
                 ),
               ),
