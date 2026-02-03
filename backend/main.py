@@ -11,7 +11,6 @@ CORS(app)
 
 # Initialize Firebase Admin SDK
 try:
-    # For production, use environment variable
     service_account_info = json.loads(os.environ.get('FIREBASE_SERVICE_ACCOUNT', '{}'))
     cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
@@ -44,36 +43,18 @@ def check_location():
     try:
         data = request.get_json()
         
-        # Validate required fields
         required_fields = ['lat', 'lng', 'fcmToken', 'placeName']
         for field in required_fields:
             if field not in data:
-                return jsonify({
-                    'success': False,
-                    'error': f'{field} is required'
-                }), 400
+                return jsonify({'success': False, 'error': f'{field} is required'}), 400
         
-        lat = data['lat']
-        lng = data['lng']
-        fcm_token = data['fcmToken']
-        place_name = data['placeName']
+        lat, lng, fcm_token, place_name = data['lat'], data['lng'], data['fcmToken'], data['placeName']
         
-        # Validate data types
         if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
-            return jsonify({
-                'success': False,
-                'error': 'lat and lng must be numbers'
-            }), 400
-        
-        if not isinstance(fcm_token, str) or not isinstance(place_name, str):
-            return jsonify({
-                'success': False,
-                'error': 'fcmToken and placeName must be strings'
-            }), 400
+            return jsonify({'success': False, 'error': 'lat and lng must be numbers'}), 400
         
         print(f"📍 Location check: {place_name} at ({lat}, {lng})")
         
-        # Create FCM message
         message = messaging.Message(
             notification=messaging.Notification(
                 title='🚌 Bus Arrived!',
@@ -96,45 +77,21 @@ def check_location():
             token=fcm_token
         )
         
-        # Send FCM notification
         response = messaging.send(message)
-        
-        print(f"✅ FCM notification sent successfully: {response}")
+        print(f"✅ FCM notification sent: {response}")
         
         return jsonify({
             'success': True,
             'message': 'Notification sent successfully',
             'fcmResponse': response,
-            'location': {
-                'placeName': place_name,
-                'coordinates': {'lat': lat, 'lng': lng}
-            }
+            'location': {'placeName': place_name, 'coordinates': {'lat': lat, 'lng': lng}}
         })
         
     except Exception as e:
-        print(f"❌ Error sending notification: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Failed to send notification',
-            'details': str(e)
-        }), 500
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        'success': False,
-        'error': 'Endpoint not found'
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        'success': False,
-        'error': 'Internal server error'
-    }), 500
+        print(f"❌ Error: {e}")
+        return jsonify({'success': False, 'error': 'Failed to send notification', 'details': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
-    print(f"🚀 Bus Tracking Backend (Python) running on port {port}")
-    print(f"📡 Health check: http://localhost:{port}/health")
+    print(f"🚀 Bus Tracking Backend running on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
