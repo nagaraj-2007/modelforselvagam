@@ -1,13 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:http/http.dart' as http;
 import 'firebase_options.dart';
+
+const String BACKEND_URL = 'https://your-backend-url.com'; // Replace with your backend URL
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,12 +43,13 @@ bool onIosBackground(ServiceInstance service) {
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  
   final prefs = await SharedPreferences.getInstance();
-  String? targetId = prefs.getString('selectedTargetId');
+  String? fcmToken = prefs.getString('passengerFcmToken');
+  String? placeName = prefs.getString('targetPlaceName');
+  double? targetLat = prefs.getDouble('targetLat');
+  double? targetLng = prefs.getDouble('targetLng');
   
-  if (targetId == null) {
+  if (fcmToken == null || placeName == null || targetLat == null || targetLng == null) {
     service.stopSelf();
     return;
   }
@@ -54,30 +58,11 @@ void onStart(ServiceInstance service) async {
     try {
       Position position = await Geolocator.getCurrentPosition();
       
-      DocumentSnapshot doc = await FirebaseFirestore.instance
-          .collection('targets')
-          .doc(targetId)
-          .get();
-      
-      if (!doc.exists) {
-        timer.cancel();
-        service.stopSelf();
-        return;
-      }
-      
-      Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-      if (data['reached'] == true) {
-        timer.cancel();
-        service.stopSelf();
-        return;
-      }
-      
-      GeoPoint targetLocation = data['location'];
       double distance = Geolocator.distanceBetween(
         position.latitude,
         position.longitude,
-        targetLocation.latitude,
-        targetLocation.longitude,
+        targetLat,
+        targetLng,
       );
       
       service.invoke('update', {
@@ -86,14 +71,13 @@ void onStart(ServiceInstance service) async {
         'lng': position.longitude,
       });
       
-      if (distance <= (data['radius'] ?? 100)) {
-        await FirebaseFirestore.instance
-            .collection('targets')
-            .doc(targetId)
-            .update({
-          'reached': true,
-          'reachedAt': FieldValue.serverTimestamp(),
-        });
+      if (distance <= 100) {
+        await _sendNotificationToBackend(
+          position.latitude,
+          position.longitude,
+          fcmToken,
+          placeName,
+        );
         
         timer.cancel();
         service.stopSelf();
@@ -102,6 +86,29 @@ void onStart(ServiceInstance service) async {
       print('Background service error: $e');
     }
   });
+}
+
+Future<void> _sendNotificationToBackend(double lat, double lng, String fcmToken, String placeName) async {
+  try {
+    final response = await http.post(
+      Uri.parse('$BACKEND_URL/check-location'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'lat': lat,
+        'lng': lng,
+        'fcmToken': fcmToken,
+        'placeName': placeName,
+      }),
+    );
+    
+    if (response.statusCode == 200) {
+      print('Notification sent successfully');
+    } else {
+      print('Failed to send notification: ${response.statusCode}');
+    }
+  } catch (e) {
+    print('Error sending notification: $e');
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -132,15 +139,19 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
   GoogleMapController? _mapController;
   Position? _currentPosition;
   bool _isTracking = false;
-  String? _selectedTargetId;
-  Map<String, dynamic>? _selectedTarget;
+  String? _passengerFcmToken;
+  String? _targetPlaceName;
+  LatLng? _targetLocation;
   double? _currentDistance;
+  
+  final TextEditingController _fcmTokenController = TextEditingController();
+  final TextEditingController _placeNameController = TextEditingController();
   
   @override
   void initState() {
     super.initState();
     _getCurrentLocation();
-    _loadSelectedTarget();
+    _loadSavedData();
     _setupServiceListener();
   }
 
@@ -174,107 +185,68 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
     );
   }
 
-  Future<void> _loadSelectedTarget() async {
+  Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
-    String? targetId = prefs.getString('selectedTargetId');
-    
-    if (targetId != null) {
-      DocumentSnapshot doc = await FirebaseFirestore.instance
-          .collection('targets')
-          .doc(targetId)
-          .get();
-      
-      if (doc.exists) {
-        setState(() {
-          _selectedTargetId = targetId;
-          _selectedTarget = doc.data() as Map<String, dynamic>;
-        });
+    setState(() {
+      _passengerFcmToken = prefs.getString('passengerFcmToken');
+      _targetPlaceName = prefs.getString('targetPlaceName');
+      double? lat = prefs.getDouble('targetLat');
+      double? lng = prefs.getDouble('targetLng');
+      if (lat != null && lng != null) {
+        _targetLocation = LatLng(lat, lng);
       }
-    }
-  }
-
-  Future<void> _createTargetAtLocation(LatLng position, [String? customName]) async {
-    String targetName;
+    });
     
-    if (customName != null) {
-      targetName = customName;
-    } else {
-      // Show dialog to enter target name
-      targetName = await _showNameDialog() ?? 'Target ${DateTime.now().millisecondsSinceEpoch}';
+    if (_passengerFcmToken != null) {
+      _fcmTokenController.text = _passengerFcmToken!;
     }
-
-    try {
-      DocumentReference docRef = await FirebaseFirestore.instance
-          .collection('targets')
-          .add({
-        'name': targetName,
-        'location': GeoPoint(position.latitude, position.longitude),
-        'radius': 100,
-        'reached': false,
-        'reachedAt': null,
-      });
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('selectedTargetId', docRef.id);
-      
-      setState(() {
-        _selectedTargetId = docRef.id;
-        _selectedTarget = {
-          'name': targetName,
-          'location': GeoPoint(position.latitude, position.longitude),
-          'radius': 100,
-          'reached': false,
-        };
-      });
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Target "$targetName" created! Share ID: ${docRef.id}'),
-          duration: const Duration(seconds: 5),
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error creating target: $e')),
-      );
+    if (_targetPlaceName != null) {
+      _placeNameController.text = _targetPlaceName!;
     }
   }
 
-  Future<String?> _showNameDialog() async {
-    final TextEditingController nameController = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Enter Target Name'),
-        content: TextField(
-          controller: nameController,
-          decoration: const InputDecoration(
-            labelText: 'Target Name',
-            hintText: 'e.g., School Gate, Bus Stop A',
-          ),
-          autofocus: true,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              final name = nameController.text.trim();
-              Navigator.pop(context, name.isEmpty ? null : name);
-            },
-            child: const Text('Create'),
-          ),
-        ],
-      ),
+  Future<void> _saveData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('passengerFcmToken', _fcmTokenController.text);
+    await prefs.setString('targetPlaceName', _placeNameController.text);
+    if (_targetLocation != null) {
+      await prefs.setDouble('targetLat', _targetLocation!.latitude);
+      await prefs.setDouble('targetLng', _targetLocation!.longitude);
+    }
+  }
+
+  void _setTarget() {
+    if (_fcmTokenController.text.isEmpty || _placeNameController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter FCM token and place name')),
+      );
+      return;
+    }
+    
+    if (_currentPosition == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Getting location...')),
+      );
+      return;
+    }
+    
+    setState(() {
+      _passengerFcmToken = _fcmTokenController.text;
+      _targetPlaceName = _placeNameController.text;
+      _targetLocation = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+    });
+    
+    _saveData();
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Target set at ${_placeNameController.text}')),
     );
   }
 
   Future<void> _toggleTracking() async {
-    if (_selectedTargetId == null) {
+    if (_passengerFcmToken == null || _targetLocation == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please create a target first')),
+        const SnackBar(content: Text('Please set target first')),
       );
       return;
     }
@@ -303,7 +275,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
         children: [
           // Map
           SizedBox(
-            height: 300,
+            height: 250,
             child: GoogleMap(
               initialCameraPosition: CameraPosition(
                 target: _currentPosition != null
@@ -312,17 +284,13 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                 zoom: 15,
               ),
               onMapCreated: (controller) => _mapController = controller,
-              onTap: _createTargetAtLocation,
               myLocationEnabled: true,
-              markers: _selectedTarget != null
+              markers: _targetLocation != null
                   ? {
                       Marker(
                         markerId: const MarkerId('target'),
-                        position: LatLng(
-                          _selectedTarget!['location'].latitude,
-                          _selectedTarget!['location'].longitude,
-                        ),
-                        infoWindow: InfoWindow(title: _selectedTarget!['name']),
+                        position: _targetLocation!,
+                        infoWindow: InfoWindow(title: _targetPlaceName ?? 'Target'),
                       ),
                     }
                   : {},
@@ -335,33 +303,38 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
-                  // Quick Actions
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () {
-                            if (_currentPosition != null) {
-                              _createTargetAtLocation(
-                                LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-                              );
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Getting location...')),
-                              );
-                            }
-                          },
-                          icon: const Icon(Icons.my_location),
-                          label: const Text('Create Here'),
-                        ),
-                      ),
-                    ],
+                  TextField(
+                    controller: _fcmTokenController,
+                    decoration: const InputDecoration(
+                      labelText: 'Passenger FCM Token',
+                      border: OutlineInputBorder(),
+                      hintText: 'Paste FCM token from passenger app',
+                    ),
+                    maxLines: 3,
+                  ),
+                  
+                  const SizedBox(height: 12),
+                  
+                  TextField(
+                    controller: _placeNameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Place Name',
+                      border: OutlineInputBorder(),
+                      hintText: 'e.g., School Gate, Bus Stop A',
+                    ),
                   ),
                   
                   const SizedBox(height: 16),
                   
-                  // Selected Target Info
-                  if (_selectedTarget != null) ...[
+                  ElevatedButton.icon(
+                    onPressed: _setTarget,
+                    icon: const Icon(Icons.my_location),
+                    label: const Text('Set Target Here'),
+                  ),
+                  
+                  const SizedBox(height: 16),
+                  
+                  if (_targetLocation != null) ...[
                     Card(
                       child: Padding(
                         padding: const EdgeInsets.all(16),
@@ -369,22 +342,11 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Target: ${_selectedTarget!['name']}',
+                              'Target: $_targetPlaceName',
                               style: const TextStyle(fontWeight: FontWeight.bold),
                             ),
-                            Text('ID: $_selectedTargetId'),
-                            Text('Status: ${_selectedTarget!['reached'] ? 'Reached' : 'Not Reached'}'),
                             if (_currentDistance != null)
                               Text('Distance: ${_currentDistance!.toStringAsFixed(0)}m'),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Tap anywhere on the map to create a target',
-                              style: TextStyle(fontSize: 12, color: Colors.grey),
-                            ),
-                            SelectableText(
-                              _selectedTargetId!,
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                            ),
                           ],
                         ),
                       ),
@@ -392,7 +354,6 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                     const SizedBox(height: 16),
                   ],
                   
-                  // Tracking Button
                   ElevatedButton.icon(
                     onPressed: _toggleTracking,
                     icon: Icon(_isTracking ? Icons.stop : Icons.play_arrow),
@@ -405,7 +366,6 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                   
                   const SizedBox(height: 16),
                   
-                  // Instructions
                   const Card(
                     color: Colors.blue,
                     child: Padding(
@@ -415,12 +375,12 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                           Icon(Icons.info, color: Colors.white),
                           SizedBox(height: 8),
                           Text(
-                            'How to create targets:',
+                            'How to use:',
                             style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                           ),
                           SizedBox(height: 4),
                           Text(
-                            '• Tap anywhere on the map\n• Or use "Create Here" for current location',
+                            '1. Get FCM token from passenger app\n2. Enter place name\n3. Set target at current location\n4. Start tracking',
                             style: TextStyle(color: Colors.white, fontSize: 12),
                             textAlign: TextAlign.center,
                           ),

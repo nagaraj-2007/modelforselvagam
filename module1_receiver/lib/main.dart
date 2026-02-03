@@ -1,13 +1,28 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'firebase_options.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  print('Background message: ${message.messageId}');
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  
+  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  
   runApp(const MyApp());
 }
 
@@ -36,19 +51,31 @@ class PassengerScreen extends StatefulWidget {
 }
 
 class _PassengerScreenState extends State<PassengerScreen> {
-  final TextEditingController _targetIdController = TextEditingController();
-  StreamSubscription<DocumentSnapshot>? _targetSubscription;
-  Map<String, dynamic>? _targetData;
-  String? _currentTargetId;
-  bool _isListening = false;
-  bool _hasNotified = false;
-  
+  String? _fcmToken;
   final FlutterTts _tts = FlutterTts();
 
   @override
   void initState() {
     super.initState();
+    _initFCM();
     _initTts();
+  }
+
+  Future<void> _initFCM() async {
+    await FirebaseMessaging.instance.requestPermission();
+    
+    _fcmToken = await FirebaseMessaging.instance.getToken();
+    print('FCM Token: $_fcmToken');
+    
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      _handleMessage(message);
+    });
+    
+    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      _handleMessage(message);
+    });
+    
+    setState(() {});
   }
 
   Future<void> _initTts() async {
@@ -58,24 +85,41 @@ class _PassengerScreenState extends State<PassengerScreen> {
     await _tts.setPitch(1.0);
   }
 
-  @override
-  void dispose() {
-    _targetSubscription?.cancel();
-    _targetIdController.dispose();
-    _tts.stop();
-    super.dispose();
+  void _handleMessage(RemoteMessage message) {
+    final placeName = message.data['location_name'] ?? 'your destination';
+    
+    _showArrivalDialog(placeName);
+    _speak('Your bus has reached $placeName. Please get ready.');
+    
+    _showLocalNotification(
+      'Bus Arrived!',
+      'Your bus has reached $placeName',
+    );
   }
 
-  Future<void> _speak(String text) async {
-    await _tts.speak(text);
+  Future<void> _showLocalNotification(String title, String body) async {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics = AndroidNotificationDetails(
+      'bus_arrival',
+      'Bus Arrival Notifications',
+      importance: Importance.max,
+      priority: Priority.high,
+    );
+    const NotificationDetails platformChannelSpecifics = NotificationDetails(android: androidPlatformChannelSpecifics);
+    
+    await flutterLocalNotificationsPlugin.show(
+      0,
+      title,
+      body,
+      platformChannelSpecifics,
+    );
   }
 
-  void _showArrivalDialog(String targetName) {
+  void _showArrivalDialog(String placeName) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('🚌 Bus Arrived!'),
-        content: Text('The bus has reached $targetName'),
+        content: Text('The bus has reached $placeName'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -86,72 +130,8 @@ class _PassengerScreenState extends State<PassengerScreen> {
     );
   }
 
-  void _startListening() {
-    final targetId = _targetIdController.text.trim();
-    if (targetId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a target ID')),
-      );
-      return;
-    }
-
-    _targetSubscription?.cancel();
-    _hasNotified = false;
-    
-    _targetSubscription = FirebaseFirestore.instance
-        .collection('targets')
-        .doc(targetId)
-        .snapshots()
-        .listen(
-      (DocumentSnapshot snapshot) {
-        if (snapshot.exists) {
-          final data = snapshot.data() as Map<String, dynamic>;
-          setState(() {
-            _targetData = data;
-          });
-          
-          // Show dialog when reached becomes true (only once)
-          if (data['reached'] == true && !_hasNotified) {
-            _hasNotified = true;
-            _showArrivalDialog(data['name']);
-            _speak('Your bus has reached ${data['name']}. Please get ready.');
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('🚌 Bus arrived at ${data['name']}!'),
-                backgroundColor: Colors.green,
-              ),
-            );
-          }
-        } else {
-          setState(() {
-            _targetData = null;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Target not found')),
-          );
-        }
-      },
-      onError: (error) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $error')),
-        );
-      },
-    );
-
-    setState(() {
-      _currentTargetId = targetId;
-      _isListening = true;
-    });
-  }
-
-  void _stopListening() {
-    _targetSubscription?.cancel();
-    setState(() {
-      _isListening = false;
-      _currentTargetId = null;
-      _targetData = null;
-      _hasNotified = false;
-    });
+  Future<void> _speak(String text) async {
+    await _tts.speak(text);
   }
 
   @override
@@ -167,62 +147,28 @@ class _PassengerScreenState extends State<PassengerScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            TextField(
-              controller: _targetIdController,
-              decoration: const InputDecoration(
-                labelText: 'Target ID',
-                border: OutlineInputBorder(),
-                hintText: 'Enter the target ID from bus app',
-              ),
-            ),
-            const SizedBox(height: 16),
-            
-            ElevatedButton.icon(
-              onPressed: _isListening ? _stopListening : _startListening,
-              icon: Icon(_isListening ? Icons.stop : Icons.play_arrow),
-              label: Text(_isListening ? 'Stop Listening' : 'Start Listening'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _isListening ? Colors.red : Colors.green,
-                foregroundColor: Colors.white,
-              ),
-            ),
-            
-            const SizedBox(height: 24),
-            
-            if (_isListening) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Listening to: $_currentTargetId',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      if (_targetData != null) ...[
-                        Text('Target: ${_targetData!['name']}'),
-                        Text(
-                          'Status: ${_targetData!['reached'] ? 'Reached ✅' : 'Not Reached ⏳'}',
-                          style: TextStyle(
-                            color: _targetData!['reached'] ? Colors.green : Colors.orange,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        if (_targetData!['reachedAt'] != null)
-                          Text(
-                            'Reached at: ${(_targetData!['reachedAt'] as Timestamp).toDate()}',
-                          ),
-                      ] else
-                        const Text('Loading target data...'),
-                    ],
-                  ),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'FCM Token:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      _fcmToken ?? 'Loading...',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
                 ),
               ),
-            ],
+            ),
             
-            // Test TTS Button
+            const SizedBox(height: 16),
+            
             OutlinedButton.icon(
               onPressed: () => _speak('Test message: Your bus will reach in a few minutes.'),
               icon: const Icon(Icons.volume_up),
@@ -242,10 +188,10 @@ class _PassengerScreenState extends State<PassengerScreen> {
                       style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                     ),
                     SizedBox(height: 8),
-                    Text('1. Get the Target ID from the bus driver'),
-                    Text('2. Enter the Target ID above'),
-                    Text('3. Tap "Start Listening"'),
-                    Text('4. You\'ll get a popup and voice announcement when the bus arrives'),
+                    Text('1. Share your FCM Token with the bus driver'),
+                    Text('2. The bus driver will use it to send notifications'),
+                    Text('3. You\'ll get push notifications when the bus arrives'),
+                    Text('4. Notifications include voice announcements'),
                   ],
                 ),
               ),
