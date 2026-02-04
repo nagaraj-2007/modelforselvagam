@@ -1,11 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'firebase_options.dart';
-
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -18,10 +15,6 @@ void main() async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-  
-  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
-  const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
   
   runApp(const MyApp());
 }
@@ -53,6 +46,7 @@ class PassengerScreen extends StatefulWidget {
 class _PassengerScreenState extends State<PassengerScreen> {
   String? _fcmToken;
   final FlutterTts _tts = FlutterTts();
+  List<String> _notifications = [];
 
   @override
   void initState() {
@@ -87,31 +81,14 @@ class _PassengerScreenState extends State<PassengerScreen> {
 
   void _handleMessage(RemoteMessage message) {
     final placeName = message.data['location_name'] ?? 'your destination';
+    final timestamp = DateTime.now().toString().substring(0, 19);
+    
+    setState(() {
+      _notifications.insert(0, '$timestamp: Bus arrived at $placeName');
+    });
     
     _showArrivalDialog(placeName);
     _speak('Your bus has reached $placeName. Please get ready.');
-    
-    _showLocalNotification(
-      'Bus Arrived!',
-      'Your bus has reached $placeName',
-    );
-  }
-
-  Future<void> _showLocalNotification(String title, String body) async {
-    const AndroidNotificationDetails androidPlatformChannelSpecifics = AndroidNotificationDetails(
-      'bus_arrival',
-      'Bus Arrival Notifications',
-      importance: Importance.max,
-      priority: Priority.high,
-    );
-    const NotificationDetails platformChannelSpecifics = NotificationDetails(android: androidPlatformChannelSpecifics);
-    
-    await flutterLocalNotificationsPlugin.show(
-      0,
-      title,
-      body,
-      platformChannelSpecifics,
-    );
   }
 
   void _showArrivalDialog(String placeName) {
@@ -175,7 +152,34 @@ class _PassengerScreenState extends State<PassengerScreen> {
               label: const Text('Test Voice'),
             ),
             
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
+            
+            const Text(
+              'Notifications:',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            
+            const SizedBox(height: 8),
+            
+            Expanded(
+              child: _notifications.isEmpty
+                  ? const Center(
+                      child: Text('No notifications yet'),
+                    )
+                  : ListView.builder(
+                      itemCount: _notifications.length,
+                      itemBuilder: (context, index) {
+                        return Card(
+                          child: ListTile(
+                            leading: const Icon(Icons.notifications),
+                            title: Text(_notifications[index]),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            
+            const SizedBox(height: 16),
             
             const Card(
               child: Padding(

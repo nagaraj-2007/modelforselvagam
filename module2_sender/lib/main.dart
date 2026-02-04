@@ -143,6 +143,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
   String? _targetPlaceName;
   LatLng? _targetLocation;
   double? _currentDistance;
+  Set<Marker> _markers = {};
   
   final TextEditingController _fcmTokenController = TextEditingController();
   final TextEditingController _placeNameController = TextEditingController();
@@ -194,6 +195,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
       double? lng = prefs.getDouble('targetLng');
       if (lat != null && lng != null) {
         _targetLocation = LatLng(lat, lng);
+        _updateMarkers();
       }
     });
     
@@ -234,6 +236,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
       _passengerFcmToken = _fcmTokenController.text;
       _targetPlaceName = _placeNameController.text;
       _targetLocation = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+      _updateMarkers();
     });
     
     _saveData();
@@ -241,6 +244,64 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Target set at ${_placeNameController.text}')),
     );
+  }
+
+  void _onMapTap(LatLng position) {
+    if (_fcmTokenController.text.isEmpty || _placeNameController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter FCM token and place name first')),
+      );
+      return;
+    }
+
+    setState(() {
+      _passengerFcmToken = _fcmTokenController.text;
+      _targetPlaceName = _placeNameController.text;
+      _targetLocation = position;
+      _updateMarkers();
+    });
+    
+    _saveData();
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Target set at ${_placeNameController.text}')),
+    );
+  }
+
+  void _updateMarkers() {
+    _markers.clear();
+    if (_targetLocation != null) {
+      _markers.add(
+        Marker(
+          markerId: const MarkerId('target'),
+          position: _targetLocation!,
+          infoWindow: InfoWindow(title: _targetPlaceName ?? 'Target'),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        ),
+      );
+    }
+  }
+
+  void _removeTarget() {
+    setState(() {
+      _targetLocation = null;
+      _targetPlaceName = null;
+      _currentDistance = null;
+      _markers.clear();
+    });
+    
+    _clearSavedTarget();
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Target removed')),
+    );
+  }
+
+  Future<void> _clearSavedTarget() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('targetPlaceName');
+    await prefs.remove('targetLat');
+    await prefs.remove('targetLng');
   }
 
   Future<void> _toggleTracking() async {
@@ -284,22 +345,15 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                 zoom: 15,
               ),
               onMapCreated: (controller) => _mapController = controller,
+              onTap: _onMapTap,
               myLocationEnabled: true,
-              markers: _targetLocation != null
-                  ? {
-                      Marker(
-                        markerId: const MarkerId('target'),
-                        position: _targetLocation!,
-                        infoWindow: InfoWindow(title: _targetPlaceName ?? 'Target'),
-                      ),
-                    }
-                  : {},
+              markers: _markers,
             ),
           ),
           
           // Controls
           Expanded(
-            child: Padding(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
@@ -310,7 +364,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                       border: OutlineInputBorder(),
                       hintText: 'Paste FCM token from passenger app',
                     ),
-                    maxLines: 3,
+                    maxLines: 2,
                   ),
                   
                   const SizedBox(height: 12),
@@ -326,10 +380,27 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                   
                   const SizedBox(height: 16),
                   
-                  ElevatedButton.icon(
-                    onPressed: _setTarget,
-                    icon: const Icon(Icons.my_location),
-                    label: const Text('Set Target Here'),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _setTarget,
+                          icon: const Icon(Icons.my_location),
+                          label: const Text('Set Target Here'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      if (_targetLocation != null)
+                        ElevatedButton.icon(
+                          onPressed: _removeTarget,
+                          icon: const Icon(Icons.clear),
+                          label: const Text('Remove'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                    ],
                   ),
                   
                   const SizedBox(height: 16),
@@ -354,13 +425,16 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                     const SizedBox(height: 16),
                   ],
                   
-                  ElevatedButton.icon(
-                    onPressed: _toggleTracking,
-                    icon: Icon(_isTracking ? Icons.stop : Icons.play_arrow),
-                    label: Text(_isTracking ? 'Stop Tracking' : 'Start Tracking'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isTracking ? Colors.red : Colors.green,
-                      foregroundColor: Colors.white,
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _toggleTracking,
+                      icon: Icon(_isTracking ? Icons.stop : Icons.play_arrow),
+                      label: Text(_isTracking ? 'Stop Tracking' : 'Start Tracking'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _isTracking ? Colors.red : Colors.green,
+                        foregroundColor: Colors.white,
+                      ),
                     ),
                   ),
                   
@@ -380,7 +454,7 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                           ),
                           SizedBox(height: 4),
                           Text(
-                            '1. Get FCM token from passenger app\n2. Enter place name\n3. Set target at current location\n4. Start tracking',
+                            '1. Get FCM token from passenger app\n2. Enter place name\n3. Tap map or use "Set Target Here"\n4. Start tracking\n\nTip: Tap anywhere on map to set target',
                             style: TextStyle(color: Colors.white, fontSize: 12),
                             textAlign: TextAlign.center,
                           ),
