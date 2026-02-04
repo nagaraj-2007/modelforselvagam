@@ -7,7 +7,21 @@ import 'firebase_options.dart';
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  print('Background message: ${message.messageId}');
+  print('📨 Background message received: ${message.messageId}');
+  
+  // Initialize TTS for background
+  final FlutterTts tts = FlutterTts();
+  await tts.setLanguage("en-US");
+  await tts.setSpeechRate(0.5);
+  await tts.setVolume(1.0);
+  await tts.setPitch(1.0);
+  
+  // Get place name and speak immediately
+  final placeName = message.data['location_name'] ?? 'your destination';
+  final speechText = 'Your bus has reached $placeName. Please get ready.';
+  
+  print('🔊 Background TTS: $speechText');
+  await tts.speak(speechText);
 }
 
 void main() async {
@@ -56,18 +70,36 @@ class _PassengerScreenState extends State<PassengerScreen> {
   }
 
   Future<void> _initFCM() async {
-    await FirebaseMessaging.instance.requestPermission();
+    await FirebaseMessaging.instance.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
     
     _fcmToken = await FirebaseMessaging.instance.getToken();
     print('FCM Token: $_fcmToken');
     
+    // Handle foreground messages
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       _handleMessage(message);
     });
     
+    // Handle messages when app is opened from notification
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      print('📨 App opened from notification');
+      final placeName = message.data['location_name'] ?? 'your destination';
+      _speak('Your bus has reached $placeName. Please get ready.');
       _handleMessage(message);
     });
+    
+    // Handle initial message if app was opened from notification
+    RemoteMessage? initialMessage = await FirebaseMessaging.instance.getInitialMessage();
+    if (initialMessage != null) {
+      print('📨 App launched from notification');
+      final placeName = initialMessage.data['location_name'] ?? 'your destination';
+      _speak('Your bus has reached $placeName. Please get ready.');
+      _handleMessage(initialMessage);
+    }
     
     setState(() {});
   }
@@ -98,7 +130,7 @@ class _PassengerScreenState extends State<PassengerScreen> {
   }
 
   void _handleMessage(RemoteMessage message) {
-    print('📨 Received message: ${message.data}');
+    print('📨 Foreground message received: ${message.data}');
     
     final placeName = message.data['location_name'] ?? 'your destination';
     final timestamp = DateTime.now().toString().substring(0, 19);
@@ -107,11 +139,12 @@ class _PassengerScreenState extends State<PassengerScreen> {
       _notifications.insert(0, '$timestamp: Bus arrived at $placeName');
     });
     
-    _showArrivalDialog(placeName);
+    // Speak immediately without delay
+    _speak('Your bus has reached $placeName. Please get ready.');
     
-    // Add delay before speaking to ensure dialog is shown
-    Future.delayed(const Duration(milliseconds: 500), () {
-      _speak('Your bus has reached $placeName. Please get ready.');
+    // Show dialog after speaking starts
+    Future.delayed(const Duration(milliseconds: 100), () {
+      _showArrivalDialog(placeName);
     });
   }
 
