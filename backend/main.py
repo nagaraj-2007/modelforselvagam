@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, firestore
 import os
 import json
 from datetime import datetime
@@ -14,6 +14,7 @@ try:
     service_account_info = json.loads(os.environ.get('FIREBASE_SERVICE_ACCOUNT', '{}'))
     cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
+    db = firestore.client()  # Initialize Firestore
     print("✅ Firebase Admin SDK initialized successfully")
 except Exception as e:
     print(f"❌ Failed to initialize Firebase Admin SDK: {e}")
@@ -55,6 +56,20 @@ def check_location():
         
         print(f"📍 Location check: {place_name} at ({lat}, {lng})")
         
+        # Store in Firestore
+        trip_data = {
+            'placeName': place_name,
+            'latitude': lat,
+            'longitude': lng,
+            'fcmToken': fcm_token,
+            'timestamp': datetime.utcnow(),
+            'status': 'arrived'
+        }
+        
+        # Add to Firestore collection
+        doc_ref = db.collection('bus_arrivals').add(trip_data)
+        print(f"💾 Stored in Firestore: {doc_ref[1].id}")
+        
         message = messaging.Message(
             notification=messaging.Notification(
                 title='🚌 Bus Arrived!',
@@ -64,7 +79,8 @@ def check_location():
                 'location_name': place_name,
                 'latitude': str(lat),
                 'longitude': str(lng),
-                'timestamp': str(datetime.utcnow())
+                'timestamp': str(datetime.utcnow()),
+                'firestore_id': doc_ref[1].id
             },
             android=messaging.AndroidConfig(
                 priority='high',
@@ -84,12 +100,39 @@ def check_location():
             'success': True,
             'message': 'Notification sent successfully',
             'fcmResponse': response,
+            'firestoreId': doc_ref[1].id,
             'location': {'placeName': place_name, 'coordinates': {'lat': lat, 'lng': lng}}
         })
         
     except Exception as e:
         print(f"❌ Error: {e}")
         return jsonify({'success': False, 'error': 'Failed to send notification', 'details': str(e)}), 500
+
+@app.route('/get-arrivals', methods=['GET'])
+def get_arrivals():
+    try:
+        # Get recent arrivals from Firestore
+        arrivals_ref = db.collection('bus_arrivals').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(50)
+        docs = arrivals_ref.stream()
+        
+        arrivals = []
+        for doc in docs:
+            arrival_data = doc.to_dict()
+            arrival_data['id'] = doc.id
+            # Convert timestamp to string for JSON serialization
+            if 'timestamp' in arrival_data:
+                arrival_data['timestamp'] = arrival_data['timestamp'].isoformat()
+            arrivals.append(arrival_data)
+        
+        return jsonify({
+            'success': True,
+            'arrivals': arrivals,
+            'count': len(arrivals)
+        })
+        
+    except Exception as e:
+        print(f"❌ Error fetching arrivals: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
