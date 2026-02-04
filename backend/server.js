@@ -11,130 +11,145 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize Firebase Admin SDK
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+try {
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('✅ Firebase Admin SDK initialized successfully');
+} catch (error) {
+  console.error('❌ Failed to initialize Firebase Admin SDK:', error);
+  process.exit(1);
+}
 
 // Initialize Firestore
 const db = admin.firestore();
 
-// Send notification endpoint
-app.post('/send-notification', async (req, res) => {
-  try {
-    const { fcmToken, placeName, lat, lng } = req.body;
+// Home endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Bus Tracking Backend API (Node.js)',
+    endpoints: {
+      'POST /check-location': 'Send bus arrival notification',
+      'GET /get-arrivals': 'Get arrival history',
+      'GET /health': 'Health check'
+    },
+    version: '1.0.0'
+  });
+});
 
-    if (!fcmToken || !placeName) {
-      return res.status(400).json({ error: 'fcmToken and placeName are required' });
+// Health check
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    service: 'Bus Tracking Backend (Node.js)'
+  });
+});
+
+// Check location and send notification
+app.post('/check-location', async (req, res) => {
+  try {
+    const { lat, lng, fcmToken, placeName } = req.body;
+
+    // Validate required fields
+    const requiredFields = ['lat', 'lng', 'fcmToken', 'placeName'];
+    for (const field of requiredFields) {
+      if (!req.body[field]) {
+        return res.status(400).json({ success: false, error: `${field} is required` });
+      }
     }
 
-    // Save to Firestore
-    const notificationData = {
-      fcmToken,
+    if (typeof lat !== 'number' || typeof lng !== 'number') {
+      return res.status(400).json({ success: false, error: 'lat and lng must be numbers' });
+    }
+
+    console.log(`📍 Location check: ${placeName} at (${lat}, ${lng})`);
+
+    // Store in Firestore
+    const tripData = {
       placeName,
-      lat: lat || null,
-      lng: lng || null,
+      latitude: lat,
+      longitude: lng,
+      fcmToken,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'sent'
+      status: 'arrived'
     };
 
+    const docRef = await db.collection('bus_arrivals').add(tripData);
+    console.log(`💾 Stored in Firestore: ${docRef.id}`);
+
+    // Send FCM notification
     const message = {
       notification: {
-        title: 'Bus Arrival Alert',
-        body: `Your bus is approaching ${placeName}!`
+        title: '🚌 Bus Arrived!',
+        body: `Your bus has reached ${placeName}. Please get ready!`
       },
       data: {
-        placeName,
-        lat: lat?.toString() || '',
-        lng: lng?.toString() || ''
+        location_name: placeName,
+        latitude: lat.toString(),
+        longitude: lng.toString(),
+        timestamp: new Date().toISOString(),
+        firestore_id: docRef.id
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          priority: 'high',
+          defaultSound: true,
+          defaultVibrateTimings: true
+        }
       },
       token: fcmToken
     };
 
     const response = await admin.messaging().send(message);
-    notificationData.messageId = response;
-    
-    // Store in Firestore
-    await db.collection('notifications').add(notificationData);
-    
-    console.log('Notification sent and saved:', response);
-    res.json({ success: true, messageId: response });
+    console.log(`✅ FCM notification sent: ${response}`);
+
+    res.json({
+      success: true,
+      message: 'Notification sent successfully',
+      fcmResponse: response,
+      firestoreId: docRef.id,
+      location: { placeName, coordinates: { lat, lng } }
+    });
+
   } catch (error) {
-    console.error('Error sending notification:', error);
-    res.status(500).json({ error: error.message });
+    console.error(`❌ Error: ${error}`);
+    res.status(500).json({ success: false, error: 'Failed to send notification', details: error.message });
   }
 });
 
-// Get notifications history
-app.get('/notifications', async (req, res) => {
+// Get arrivals history
+app.get('/get-arrivals', async (req, res) => {
   try {
-    const snapshot = await db.collection('notifications')
+    const snapshot = await db.collection('bus_arrivals')
       .orderBy('timestamp', 'desc')
       .limit(50)
       .get();
-    
-    const notifications = [];
+
+    const arrivals = [];
     snapshot.forEach(doc => {
-      notifications.push({ id: doc.id, ...doc.data() });
+      const data = doc.data();
+      arrivals.push({
+        id: doc.id,
+        ...data,
+        timestamp: data.timestamp ? data.timestamp.toDate().toISOString() : null
+      });
     });
-    
-    res.json(notifications);
-  } catch (error) {
-    console.error('Error fetching notifications:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
-// Register passenger
-app.post('/register-passenger', async (req, res) => {
-  try {
-    const { fcmToken, name, phone } = req.body;
-    
-    if (!fcmToken) {
-      return res.status(400).json({ error: 'fcmToken is required' });
-    }
-    
-    const passengerData = {
-      fcmToken,
-      name: name || 'Anonymous',
-      phone: phone || null,
-      registeredAt: admin.firestore.FieldValue.serverTimestamp(),
-      active: true
-    };
-    
-    const docRef = await db.collection('passengers').add(passengerData);
-    res.json({ success: true, passengerId: docRef.id });
-  } catch (error) {
-    console.error('Error registering passenger:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get passengers
-app.get('/passengers', async (req, res) => {
-  try {
-    const snapshot = await db.collection('passengers')
-      .where('active', '==', true)
-      .orderBy('registeredAt', 'desc')
-      .get();
-    
-    const passengers = [];
-    snapshot.forEach(doc => {
-      passengers.push({ id: doc.id, ...doc.data() });
+    res.json({
+      success: true,
+      arrivals,
+      count: arrivals.length
     });
-    
-    res.json(passengers);
-  } catch (error) {
-    console.error('Error fetching passengers:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  } catch (error) {
+    console.error(`❌ Error fetching arrivals: ${error}`);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`FCM v1 Backend running on port ${PORT}`);
+  console.log(`🚀 Bus Tracking Backend running on port ${PORT}`);
 });

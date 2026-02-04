@@ -49,7 +49,13 @@ void onStart(ServiceInstance service) async {
   double? targetLat = prefs.getDouble('targetLat');
   double? targetLng = prefs.getDouble('targetLng');
   
+  print('🔍 Background Service Started');
+  print('FCM Token: ${fcmToken?.substring(0, 20)}...');
+  print('Place Name: $placeName');
+  print('Target: $targetLat, $targetLng');
+  
   if (fcmToken == null || placeName == null || targetLat == null || targetLng == null) {
+    print('❌ Missing required data, stopping service');
     service.stopSelf();
     return;
   }
@@ -65,6 +71,8 @@ void onStart(ServiceInstance service) async {
         targetLng,
       );
       
+      print('📍 Current distance: ${distance.toStringAsFixed(0)}m');
+      
       service.invoke('update', {
         'distance': distance.round(),
         'lat': position.latitude,
@@ -72,6 +80,7 @@ void onStart(ServiceInstance service) async {
       });
       
       if (distance <= 100) {
+        print('🎯 Within 100m! Sending notification...');
         await _sendNotificationToBackend(
           position.latitude,
           position.longitude,
@@ -90,6 +99,9 @@ void onStart(ServiceInstance service) async {
 
 Future<void> _sendNotificationToBackend(double lat, double lng, String fcmToken, String placeName) async {
   try {
+    print('🚀 Sending to backend: $BACKEND_URL/check-location');
+    print('Data: lat=$lat, lng=$lng, place=$placeName');
+    
     final response = await http.post(
       Uri.parse('$BACKEND_URL/check-location'),
       headers: {'Content-Type': 'application/json'},
@@ -99,15 +111,19 @@ Future<void> _sendNotificationToBackend(double lat, double lng, String fcmToken,
         'fcmToken': fcmToken,
         'placeName': placeName,
       }),
-    );
+    ).timeout(const Duration(seconds: 30));
+    
+    print('📱 Response status: ${response.statusCode}');
+    print('📱 Response body: ${response.body}');
     
     if (response.statusCode == 200) {
-      print('Notification sent successfully');
+      print('✅ Notification sent successfully');
     } else {
-      print('Failed to send notification: ${response.statusCode}');
+      print('❌ Failed to send notification: ${response.statusCode}');
+      print('Error body: ${response.body}');
     }
   } catch (e) {
-    print('Error sending notification: $e');
+    print('❌ Error sending notification: $e');
   }
 }
 
@@ -215,6 +231,12 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
       await prefs.setDouble('targetLat', _targetLocation!.latitude);
       await prefs.setDouble('targetLng', _targetLocation!.longitude);
     }
+    
+    // Update instance variables
+    setState(() {
+      _passengerFcmToken = _fcmTokenController.text;
+      _targetPlaceName = _placeNameController.text;
+    });
   }
 
   void _setTarget() {
@@ -302,6 +324,26 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
     await prefs.remove('targetPlaceName');
     await prefs.remove('targetLat');
     await prefs.remove('targetLng');
+  }
+
+  Future<void> _testNotification() async {
+    if (_passengerFcmToken == null || _targetPlaceName == null || _currentPosition == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Missing data for test')),
+      );
+      return;
+    }
+
+    await _sendNotificationToBackend(
+      _currentPosition!.latitude,
+      _currentPosition!.longitude,
+      _passengerFcmToken!,
+      _targetPlaceName!,
+    );
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Test notification sent!')),
+    );
   }
 
   Future<void> _toggleTracking() async {
@@ -437,6 +479,18 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                       ),
                     ),
                   ),
+                  
+                  const SizedBox(height: 8),
+                  
+                  if (_passengerFcmToken != null && _targetPlaceName != null)
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _testNotification,
+                        icon: const Icon(Icons.notifications),
+                        label: const Text('Test Notification'),
+                      ),
+                    ),
                   
                   const SizedBox(height: 16),
                   
