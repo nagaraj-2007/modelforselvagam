@@ -60,9 +60,12 @@ void onStart(ServiceInstance service) async {
     return;
   }
 
-  Timer.periodic(const Duration(seconds: 10), (timer) async {
+  Timer.periodic(const Duration(seconds: 5), (timer) async {
     try {
-      Position position = await Geolocator.getCurrentPosition();
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 8),
+      );
       
       double distance = Geolocator.distanceBetween(
         position.latitude,
@@ -71,12 +74,15 @@ void onStart(ServiceInstance service) async {
         targetLng,
       );
       
-      print('📍 Current distance: ${distance.toStringAsFixed(0)}m');
+      print('📍 Current: ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}');
+      print('🎯 Target: ${targetLat.toStringAsFixed(6)}, ${targetLng.toStringAsFixed(6)}');
+      print('📏 Distance: ${distance.toStringAsFixed(1)}m (Accuracy: ${position.accuracy.toStringAsFixed(1)}m)');
       
       service.invoke('update', {
         'distance': distance.round(),
         'lat': position.latitude,
         'lng': position.longitude,
+        'accuracy': position.accuracy,
       });
       
       if (distance <= 100) {
@@ -179,6 +185,15 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
         setState(() {
           _currentDistance = event?['distance']?.toDouble();
         });
+        
+        // Debug: Print current and target positions
+        if (event != null) {
+          print('📍 Current: ${event['lat']}, ${event['lng']}');
+          if (_targetLocation != null) {
+            print('🎯 Target: ${_targetLocation!.latitude}, ${_targetLocation!.longitude}');
+            print('📏 Distance: ${_currentDistance?.toStringAsFixed(1)}m');
+          }
+        }
       }
     });
   }
@@ -191,15 +206,30 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
     
     if (permission == LocationPermission.deniedForever) return;
     
-    Position position = await Geolocator.getCurrentPosition();
-    setState(() => _currentPosition = position);
-    
-    _mapController?.animateCamera(
-      CameraUpdate.newLatLngZoom(
-        LatLng(position.latitude, position.longitude),
-        15,
-      ),
-    );
+    try {
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+      
+      print('📍 Got location: ${position.latitude}, ${position.longitude}');
+      print('📏 Accuracy: ${position.accuracy}m');
+      
+      setState(() => _currentPosition = position);
+      
+      _mapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(position.latitude, position.longitude),
+          18, // Higher zoom for better accuracy
+        ),
+      );
+      
+      // Update markers to show current position
+      _updateMarkers();
+      
+    } catch (e) {
+      print('Error getting location: $e');
+    }
   }
 
   Future<void> _loadSavedData() async {
@@ -292,15 +322,51 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
 
   void _updateMarkers() {
     _markers.clear();
+    
+    // Add target marker
     if (_targetLocation != null) {
       _markers.add(
         Marker(
           markerId: const MarkerId('target'),
           position: _targetLocation!,
-          infoWindow: InfoWindow(title: _targetPlaceName ?? 'Target'),
+          infoWindow: InfoWindow(
+            title: _targetPlaceName ?? 'Target',
+            snippet: 'Lat: ${_targetLocation!.latitude.toStringAsFixed(6)}, Lng: ${_targetLocation!.longitude.toStringAsFixed(6)}'
+          ),
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
         ),
       );
+    }
+    
+    // Add current position marker if available
+    if (_currentPosition != null) {
+      _markers.add(
+        Marker(
+          markerId: const MarkerId('current'),
+          position: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+          infoWindow: InfoWindow(
+            title: 'Current Position',
+            snippet: 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)}, Lng: ${_currentPosition!.longitude.toStringAsFixed(6)}'
+          ),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        ),
+      );
+      
+      // Calculate and display distance if target exists
+      if (_targetLocation != null) {
+        double distance = Geolocator.distanceBetween(
+          _currentPosition!.latitude,
+          _currentPosition!.longitude,
+          _targetLocation!.latitude,
+          _targetLocation!.longitude,
+        );
+        
+        setState(() {
+          _currentDistance = distance;
+        });
+        
+        print('📏 Real-time distance: ${distance.toStringAsFixed(1)}m');
+      }
     }
   }
 
@@ -458,8 +524,11 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
                               'Target: $_targetPlaceName',
                               style: const TextStyle(fontWeight: FontWeight.bold),
                             ),
+                            Text('Coordinates: ${_targetLocation!.latitude.toStringAsFixed(6)}, ${_targetLocation!.longitude.toStringAsFixed(6)}'),
                             if (_currentDistance != null)
-                              Text('Distance: ${_currentDistance!.toStringAsFixed(0)}m'),
+                              Text('Distance: ${_currentDistance!.toStringAsFixed(1)}m'),
+                            if (_currentPosition != null)
+                              Text('Current: ${_currentPosition!.latitude.toStringAsFixed(6)}, ${_currentPosition!.longitude.toStringAsFixed(6)}'),
                           ],
                         ),
                       ),

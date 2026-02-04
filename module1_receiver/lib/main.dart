@@ -73,13 +73,33 @@ class _PassengerScreenState extends State<PassengerScreen> {
   }
 
   Future<void> _initTts() async {
-    await _tts.setLanguage("en-US");
-    await _tts.setSpeechRate(0.5);
-    await _tts.setVolume(1.0);
-    await _tts.setPitch(1.0);
+    try {
+      await _tts.setLanguage("en-US");
+      await _tts.setSpeechRate(0.5);
+      await _tts.setVolume(1.0);
+      await _tts.setPitch(1.0);
+      
+      // Test if TTS is working
+      bool isLanguageAvailable = await _tts.isLanguageAvailable("en-US");
+      print('TTS Language available: $isLanguageAvailable');
+      
+      // Set up TTS completion handler
+      _tts.setCompletionHandler(() {
+        print('TTS completed');
+      });
+      
+      _tts.setErrorHandler((msg) {
+        print('TTS Error: $msg');
+      });
+      
+    } catch (e) {
+      print('TTS initialization error: $e');
+    }
   }
 
   void _handleMessage(RemoteMessage message) {
+    print('📨 Received message: ${message.data}');
+    
     final placeName = message.data['location_name'] ?? 'your destination';
     final timestamp = DateTime.now().toString().substring(0, 19);
     
@@ -88,7 +108,11 @@ class _PassengerScreenState extends State<PassengerScreen> {
     });
     
     _showArrivalDialog(placeName);
-    _speak('Your bus has reached $placeName. Please get ready.');
+    
+    // Add delay before speaking to ensure dialog is shown
+    Future.delayed(const Duration(milliseconds: 500), () {
+      _speak('Your bus has reached $placeName. Please get ready.');
+    });
   }
 
   void _showArrivalDialog(String placeName) {
@@ -108,7 +132,19 @@ class _PassengerScreenState extends State<PassengerScreen> {
   }
 
   Future<void> _speak(String text) async {
-    await _tts.speak(text);
+    try {
+      print('🔊 Speaking: $text');
+      
+      // Stop any current speech
+      await _tts.stop();
+      
+      // Speak the text
+      var result = await _tts.speak(text);
+      print('TTS Result: $result');
+      
+    } catch (e) {
+      print('TTS speak error: $e');
+    }
   }
 
   @override
@@ -150,6 +186,14 @@ class _PassengerScreenState extends State<PassengerScreen> {
               onPressed: () => _speak('Test message: Your bus will reach in a few minutes.'),
               icon: const Icon(Icons.volume_up),
               label: const Text('Test Voice'),
+            ),
+            
+            const SizedBox(height: 8),
+            
+            OutlinedButton.icon(
+              onPressed: () => _speak('Your bus has reached School Gate. Please get ready.'),
+              icon: const Icon(Icons.directions_bus),
+              label: const Text('Test Arrival Voice'),
             ),
             
             const SizedBox(height: 16),
