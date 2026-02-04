@@ -412,6 +412,36 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
     );
   }
 
+  Future<void> _sendNotificationToBackend(double lat, double lng, String fcmToken, String placeName) async {
+    try {
+      print('🚀 Sending to backend: $BACKEND_URL/check-location');
+      print('Data: lat=$lat, lng=$lng, place=$placeName');
+      
+      final response = await http.post(
+        Uri.parse('$BACKEND_URL/check-location'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'lat': lat,
+          'lng': lng,
+          'fcmToken': fcmToken,
+          'placeName': placeName,
+        }),
+      ).timeout(const Duration(seconds: 30));
+      
+      print('📱 Response status: ${response.statusCode}');
+      print('📱 Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        print('✅ Notification sent successfully');
+      } else {
+        print('❌ Failed to send notification: ${response.statusCode}');
+        print('Error body: ${response.body}');
+      }
+    } catch (e) {
+      print('❌ Error sending notification: $e');
+    }
+  }
+
   Future<void> _toggleTracking() async {
     if (_passengerFcmToken == null || _targetLocation == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -427,8 +457,50 @@ class _BusTrackerScreenState extends State<BusTrackerScreen> {
       setState(() => _isTracking = false);
     } else {
       await Permission.locationAlways.request();
+      
+      // Check current distance immediately
+      if (_currentPosition != null) {
+        double currentDistance = Geolocator.distanceBetween(
+          _currentPosition!.latitude,
+          _currentPosition!.longitude,
+          _targetLocation!.latitude,
+          _targetLocation!.longitude,
+        );
+        
+        print('🎯 Initial distance check: ${currentDistance.toStringAsFixed(1)}m');
+        
+        if (currentDistance <= 100) {
+          print('✅ Already within 100m! Sending immediate notification...');
+          
+          // Send notification immediately
+          await _sendNotificationToBackend(
+            _currentPosition!.latitude,
+            _currentPosition!.longitude,
+            _passengerFcmToken!,
+            _targetPlaceName!,
+          );
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Already within 100m! Notification sent immediately.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          
+          return; // Don't start background service
+        }
+      }
+      
+      // Start background service for continuous tracking
       await service.startService();
       setState(() => _isTracking = true);
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Tracking started. Will notify when within 100m.'),
+          backgroundColor: Colors.blue,
+        ),
+      );
     }
   }
 
