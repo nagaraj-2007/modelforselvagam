@@ -10,7 +10,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
 import 'firebase_options.dart';
 
-const String BACKEND_URL = 'https://your-backend-url.com'; // Replace with your backend URL
+const String BACKEND_URL = 'https://modelforselvagam.onrender.com';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
